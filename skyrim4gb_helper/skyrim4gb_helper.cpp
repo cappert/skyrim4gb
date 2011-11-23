@@ -19,132 +19,12 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "stdafx.h"
 
-HANDLE hOutput = 0;
-HANDLE hError = 0;
-
 #ifdef _MANAGED
 #pragma managed(push, off)
 #endif
 
-void WriteLine(HANDLE h=hOutput) 
-{
-	if (h == 0) return;
-
-	DWORD numwritten;
-	WriteFile(h,"\r\n",2, &numwritten,0);
-	FlushFileBuffers(hOutput);
-}
-
-void Write(const char *str,HANDLE h=hOutput) 
-{
-	if (h == 0) return;
-
-	DWORD len = 0;
-	while(str[len]) ++len;
-
-	DWORD numwritten;
-	WriteFile(h,str,len,&numwritten,0);
-}
-
-void WriteLine(const char *str, HANDLE h=hOutput) 
-{
-	if (h == 0) return;
-	Write(str,h);
-	WriteLine();
-}
-
-void Write(const wchar_t *str,HANDLE h=hOutput) 
-{
-	if (h == 0) return;
-
-	DWORD numwritten;
-
-	if (GetFileType(h) == FILE_TYPE_CHAR) {
-		DWORD len = 0;
-		while(str[len]) ++len;
-		WriteConsole (h,str,len,&numwritten,0);
-	} else {
-		numwritten = WideCharToMultiByte(CP_UTF8,0,str,-1,0,0,NULL,NULL);
-
-		LPSTR utf8 = (LPSTR) LocalAlloc(LMEM_FIXED,numwritten);
-		numwritten = WideCharToMultiByte(CP_UTF8,0,str,-1,utf8,numwritten,NULL,NULL);
-
-		WriteFile(h,utf8,numwritten-1,&numwritten,0);
-
-		LocalFree((HLOCAL) utf8);
-	}
-}
-
-void WriteLine(const wchar_t *str, HANDLE h=hOutput) 
-{
-	if (h == 0) return;
-	Write(str,h);
-	WriteLine();
-}
-void Write(DWORD_PTR val,HANDLE h=hOutput) 
-{
-	if (h == 0) return;
-
-	char str[32];
-	char *ptr = str+32;
-	*--ptr=0;
-	while (val) {
-		int nibble = val&0xF;
-		val >>= 4;
-
-		if (nibble <= 9) *--ptr = '0' + nibble;
-		else *--ptr = 'A' + nibble - 0xA;
-	}
-
-	DWORD numwritten;
-	WriteFile(h,ptr,str+31-ptr,&numwritten,0);
-}
-void WriteLine(DWORD_PTR val,HANDLE h=hOutput) 
-{
-	if (h == 0) return;
-	Write(val,h);
-	WriteLine();
-}
-void Write(int val,HANDLE h=hOutput)
-{
-	if (h == 0) return;
-
-	bool wasneg = val<0;
-	if (wasneg) val = -val;
-	char str[32];
-	char *ptr = str+32;
-	*--ptr=0;
-	while (val) {
-		*--ptr = '0' + val%10;
-		val /= 10;
-	}
-	if (wasneg) *--ptr = '-';
-	DWORD numwritten;
-	WriteFile(h,ptr,str+31-ptr,&numwritten,0);
-}
-void WriteLine(int val,HANDLE h=hOutput)
-{
-	if (h == 0) return;
-	Write(val,h);
-	WriteLine();
-}
-
-void WriteError(DWORD error, HANDLE h=hOutput)
-{
-	LPVOID lpMsgBuf;
-
-	FormatMessage(
-		FORMAT_MESSAGE_ALLOCATE_BUFFER | 
-		FORMAT_MESSAGE_FROM_SYSTEM,
-		NULL,
-		error,
-		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-		(LPTSTR) &lpMsgBuf,
-		0, NULL );
-
-	Write((LPTSTR)lpMsgBuf);
-	LocalFree(lpMsgBuf);
-}
+HMODULE executable;
+TCHAR exe_filename[MAX_PATH];
 
 FARPROC WINAPI GetProcAddressWrap(
   __in  HMODULE hModule,
@@ -239,6 +119,56 @@ int mystricmp(const char *left, const char *right)
 
 	return *left - *right;
 }
+int mystricmp(const wchar_t *left, const wchar_t *right)
+{
+	while (*left && *right)
+	{
+		int l = *left++;
+		int r = *right++;
+
+		if (l >= 'a' && l <= 'z') l -= 0x20;
+		if (r >= 'a' && r <= 'z') r -= 0x20;
+
+		int res = l - r;
+		if (res != 0) return res;
+	}
+
+	return *left - *right;
+}
+
+REDIRECTABLE_FUNCTION_EX(DWORD,WINAPI,GetModuleFileNameA,(__in_opt HMODULE hModule, __out LPSTR lpFilename, __in DWORD nSize))
+{
+	DWORD res = GetModuleFileNameA_o(hModule, lpFilename, nSize);
+
+	if (executable == hModule) {
+		if (res) {
+			if (res >= 8 && !mystricmp(&exe_filename[res-8],TEXT(".exe.4gb"))) 
+			{
+				res-=4;
+				if (lpFilename) lpFilename[res] = 0;
+			}
+		}
+	}
+
+	return res;
+}
+REDIRECTABLE_FUNCTION_EX(DWORD,WINAPI,GetModuleFileNameW,(__in_opt HMODULE hModule, __out LPWSTR lpFilename, __in DWORD nSize))
+{
+	DWORD res = GetModuleFileNameW_o(hModule, lpFilename, nSize);
+
+	if (executable == hModule) {
+		if (res) {
+			if (res >= 8 && !mystricmp(&exe_filename[res-8],TEXT(".exe.4gb"))) 
+			{
+				res-=4;
+				if (lpFilename) lpFilename[res] = 0;
+			}
+		}
+	}
+
+	return res;
+}
+
 
 REDIRECTABLE_FUNCTION_EX(HANDLE,WINAPI,CreateFileA,(LPCSTR lpFileName,DWORD dwDesiredAccess,DWORD dwShareMode,LPSECURITY_ATTRIBUTES lpSecurityAttributes,DWORD dwCreationDisposition,DWORD dwFlagsAndAttributes,HANDLE hTemplateFile))
 {
@@ -380,15 +310,14 @@ extern "C" BOOL WINAPI _DllMainCRTStartup( HMODULE hModule,
 {
 	if (ul_reason_for_call == DLL_PROCESS_ATTACH)
 	{
-		HMODULE executable = GetModuleHandle(NULL);
+		executable = GetModuleHandle(NULL);
 
-		TCHAR filename[MAX_PATH];
-		GetModuleFileName(executable,filename,MAX_PATH);
-		//MessageBox(0,filename,TEXT("Attach Debugger"),MB_OK);
+		GetModuleFileName(executable,exe_filename,MAX_PATH);
+		//MessageBox(0,exe_filename,TEXT("Attach Debugger"),MB_OK);
 
 		//AllocConsole();
 		if (AttachConsole(ATTACH_PARENT_PROCESS)) {
-			MessageBox(0,filename,TEXT("Attach Debugger?"),MB_OK);
+			MessageBox(0,exe_filename,TEXT("Attach Debugger?"),MB_OK);
 		}
 		hOutput = GetStdHandle(STD_OUTPUT_HANDLE);
 		hError = GetStdHandle(STD_ERROR_HANDLE);
@@ -405,8 +334,10 @@ extern "C" BOOL WINAPI _DllMainCRTStartup( HMODULE hModule,
 				Write("\xEF\xBB\xBF",hError);
 		}
 
+		WriteLine("skyrim4gb_helper: successfully injected");
+
 		Write("Executable filename: ");
-		WriteLine(filename);
+		WriteLine(exe_filename);
 		Write("Executable address: 0x");
 		WriteLine((DWORD_PTR)executable);
 
@@ -434,8 +365,11 @@ extern "C" BOOL WINAPI _DllMainCRTStartup( HMODULE hModule,
 			WriteLine(" - Succeeded");
 		}
 
-		WriteLine("Redirecting CreateFileA");
-		REDIRECT_FUNCTION(Kernel32,CreateFileA);
+		WriteLine("Redirecting GetModuleFileNameA");
+		if (!REDIRECT_FUNCTION(Kernel32,GetModuleFileNameA)) {
+			WriteLine("Falling back to CreateFileA redirection");
+			REDIRECT_FUNCTION(Kernel32,CreateFileA);
+		}
 
 #if 0
 #ifndef USE_THREADED_GETTICKCOUNT
@@ -460,6 +394,8 @@ extern "C" BOOL WINAPI _DllMainCRTStartup( HMODULE hModule,
 		else {
 			WriteLine(" - Succeeded");
 		}
+
+		WriteLine("skyrim4gb_helper: returning from DLLStartup");
 	}
     return TRUE;
 }

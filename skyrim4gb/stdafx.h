@@ -46,3 +46,4 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #include <tchar.h>
 
 // TODO: reference additional headers your program requires here
+#include "conio.h"

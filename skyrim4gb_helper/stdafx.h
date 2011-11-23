@@ -43,10 +43,12 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #include <windows.h>
 
 
+// TODO: reference additional headers your program requires here
+
 extern int mystricmp(const char *left, const char *right);
 
 extern void DwordToString(DWORD num, char string[16]);
 
-#include "../redirector.h"
+#include "redirector.h"
+#include "conio.h"
 
-// TODO: reference additional headers your program requires here
