@@ -62,7 +62,7 @@
 			/>
 			<Tool
 				Name="VCLinkerTool"
-				AdditionalDependencies="Psapi.lib ComCtl32.lib winmm.lib"
+				AdditionalDependencies="Psapi.lib ComCtl32.lib winmm.lib  shlwapi.lib"
 				LinkIncremental="2"
 				IgnoreAllDefaultLibraries="true"
 				GenerateDebugInformation="true"
@@ -141,7 +141,7 @@
 			/>
 			<Tool
 				Name="VCLinkerTool"
-				AdditionalDependencies="Psapi.lib ComCtl32.lib winmm.lib"
+				AdditionalDependencies="Psapi.lib ComCtl32.lib winmm.lib shlwapi.lib"
 				LinkIncremental="1"
 				IgnoreAllDefaultLibraries="true"
 				GenerateDebugInformation="true"

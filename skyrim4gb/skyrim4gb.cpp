@@ -21,6 +21,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #include "resource.h"
 #include <commctrl.h>
 #include <mmsystem.h>
+#include <shlwapi.h>
+#include <shlobj.h>
 
 HWND dialog = 0;
 
@@ -279,7 +281,7 @@ int WinMainCRTStartup()
 		return -1;
 	}
 
-	TCHAR skyrimpath[MAX_PATH+1];
+	TCHAR skyrimpath[MAX_PATH+1] = TEXT("");
 	
 	HKEY regkey;
 	if (RegOpenKey(HKEY_LOCAL_MACHINE,TEXT("SOFTWARE\\Bethesda Softworks\\Skyrim"),&regkey) == ERROR_SUCCESS)
@@ -287,21 +289,45 @@ int WinMainCRTStartup()
 		DWORD type;
 		if (RegQueryValueEx(regkey,TEXT("Installed Path"),NULL ,&type,NULL,NULL) == ERROR_SUCCESS)
 		{
-			DWORD skyrimpath_size = MAX_PATH+1;
+			DWORD skyrimpath_size = (MAX_PATH+1)*sizeof(TCHAR);
 			if ((type == REG_SZ || type == REG_EXPAND_SZ) && RegQueryValueEx(regkey,TEXT("Installed Path"),NULL,&type,(LPBYTE) skyrimpath,&skyrimpath_size) == ERROR_SUCCESS)
 			{
 				if (type == REG_SZ || type == REG_EXPAND_SZ)
 				{
 					skyrimpath[MAX_PATH] = 0;				
-					if (!SetCurrentDirectory(skyrimpath))
-					{
-						ShowError(TEXT("Unable set current dir to Skyrim dir."));
-						return -1;
-					}
 				}
 			}
 		}
 		RegCloseKey(regkey);
+	}
+
+	// Attempt to get it from steam
+	if (!*skyrimpath) 
+	{
+		if (RegOpenKey(HKEY_LOCAL_MACHINE,TEXT("SOFTWARE\\Valve\\Steam"),&regkey) == ERROR_SUCCESS)
+		{
+			DWORD type;
+			if (RegQueryValueEx(regkey,TEXT("InstallPath"),NULL ,&type,NULL,NULL) == ERROR_SUCCESS)
+			{
+				DWORD skyrimpath_size = (MAX_PATH+1)*sizeof(TCHAR);
+				if ((type == REG_SZ || type == REG_EXPAND_SZ) && RegQueryValueEx(regkey,TEXT("InstallPath"),NULL,&type,(LPBYTE) skyrimpath,&skyrimpath_size) == ERROR_SUCCESS)
+				{
+					if (type == REG_SZ || type == REG_EXPAND_SZ)
+					{
+						skyrimpath[MAX_PATH] = 0;				
+						PathAppend(skyrimpath,TEXT("steamapps\\common\\skyrim"));
+					}
+				}
+			}
+			RegCloseKey(regkey);
+		}
+	}
+
+
+	if (*skyrimpath && !SetCurrentDirectory(skyrimpath))
+	{
+		ShowError(TEXT("Unable set current dir to Skyrim dir."));
+		return -1;
 	}
 
 	WIN32_FILE_ATTRIBUTE_DATA TESV_exe_info, TESV_4gb_info;
@@ -381,8 +407,32 @@ int WinMainCRTStartup()
 	STARTUPINFO startupinfo;
 	ZeroMemory(&startupinfo,sizeof(startupinfo));
 	startupinfo.cb = sizeof(startupinfo);
+
+	HRESULT hr;
+	
+	if (!IsDebuggerPresent()) {
+		SECURITY_ATTRIBUTES sec;
+		ZeroMemory(&sec,sizeof(sec));
+		sec.bInheritHandle = TRUE;
+
+		TCHAR logfile[MAX_PATH];
+		if (SUCCEEDED(hr = SHGetFolderPathAndSubDir(NULL,CSIDL_MYDOCUMENTS,NULL,SHGFP_TYPE_CURRENT,TEXT("My Games\\Skyrim"), logfile))) {
+			PathAppend(logfile, TEXT("Skyrim4GB.log"));
+			startupinfo.hStdOutput = startupinfo.hStdError = CreateFile(logfile,GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,&sec,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,0);
+			startupinfo.dwFlags |= STARTF_USESTDHANDLES;
+		}
+	}
+	else {
+		AllocConsole();
+	}
+
 	if (CreateProcess(setbit?TEXT("TESV.exe.4gb"):TEXT("TESV.exe"), TEXT("TESV.exe"), NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, &startupinfo,  &procinfo))
 	{
+		if (startupinfo.dwFlags & STARTF_USESTDHANDLES) {
+			CloseHandle(startupinfo.hStdOutput);
+			if (startupinfo.hStdError != startupinfo.hStdOutput)
+				CloseHandle(startupinfo.hStdError);
+		}
 #ifdef UNICODE
 		LPBYTE addr_load_lib = (LPBYTE) GetProcAddress(GetModuleHandle(TEXT("KERNEL32")),"LoadLibraryW");
 #else

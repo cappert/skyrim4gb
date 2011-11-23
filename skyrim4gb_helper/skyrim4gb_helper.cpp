@@ -26,11 +26,116 @@ HANDLE hError = 0;
 #pragma managed(push, off)
 #endif
 
+void WriteLine(HANDLE h=hOutput) 
+{
+	if (h == 0) return;
+
+	DWORD numwritten;
+	WriteFile(h,"\r\n",2, &numwritten,0);
+	FlushFileBuffers(hOutput);
+}
+
+void Write(const char *str,HANDLE h=hOutput) 
+{
+	if (h == 0) return;
+
+	DWORD len = 0;
+	while(str[len]) ++len;
+
+	DWORD numwritten;
+	WriteFile(h,str,len,&numwritten,0);
+}
+
+void WriteLine(const char *str, HANDLE h=hOutput) 
+{
+	if (h == 0) return;
+	Write(str,h);
+	WriteLine();
+}
+
+void Write(const wchar_t *str,HANDLE h=hOutput) 
+{
+	if (h == 0) return;
+
+	DWORD numwritten;
+
+	if (GetFileType(h) == FILE_TYPE_CHAR) {
+		DWORD len = 0;
+		while(str[len]) ++len;
+		WriteConsole (h,str,len,&numwritten,0);
+	} else {
+		numwritten = WideCharToMultiByte(CP_UTF8,0,str,-1,0,0,NULL,NULL);
+
+		LPSTR utf8 = (LPSTR) LocalAlloc(LMEM_FIXED,numwritten);
+		numwritten = WideCharToMultiByte(CP_UTF8,0,str,-1,utf8,numwritten,NULL,NULL);
+
+		WriteFile(h,utf8,numwritten-1,&numwritten,0);
+
+		LocalFree((HLOCAL) utf8);
+	}
+}
+
+void WriteLine(const wchar_t *str, HANDLE h=hOutput) 
+{
+	if (h == 0) return;
+	Write(str,h);
+	WriteLine();
+}
+void Write(DWORD_PTR val,HANDLE h=hOutput) 
+{
+	if (h == 0) return;
+
+	char str[32];
+	char *ptr = str+32;
+	*--ptr=0;
+	while (val) {
+		int nibble = val&0xF;
+		val >>= 4;
+
+		if (nibble <= 9) *--ptr = '0' + nibble;
+		else *--ptr = 'A' + nibble - 0xA;
+	}
+
+	DWORD numwritten;
+	WriteFile(h,ptr,str+31-ptr,&numwritten,0);
+}
+void WriteLine(DWORD_PTR val,HANDLE h=hOutput) 
+{
+	if (h == 0) return;
+	Write(val,h);
+	WriteLine();
+}
+void Write(int val,HANDLE h=hOutput)
+{
+	if (h == 0) return;
+
+	bool wasneg = val<0;
+	if (wasneg) val = -val;
+	char str[32];
+	char *ptr = str+32;
+	*--ptr=0;
+	while (val) {
+		*--ptr = '0' + val%10;
+		val /= 10;
+	}
+	if (wasneg) *--ptr = '-';
+	DWORD numwritten;
+	WriteFile(h,ptr,str+31-ptr,&numwritten,0);
+}
+void WriteLine(int val,HANDLE h)
+{
+	if (h == 0) return;
+	Write(val,h);
+	WriteLine();
+}
+
+
 int Change4GBValue(LPVOID baseaddress, bool set)
 {
 	PIMAGE_DOS_HEADER pDOSHeader = static_cast<PIMAGE_DOS_HEADER>( baseaddress );
 	if( pDOSHeader->e_magic != IMAGE_DOS_SIGNATURE )
 	{ 
+		WriteLine("pDOSHeader->e_magic != IMAGE_DOS_SIGNATURE");
 		return -1; 
 	}
 
@@ -39,6 +144,7 @@ int Change4GBValue(LPVOID baseaddress, bool set)
 
 	if(pNTHeader->Signature != IMAGE_NT_SIGNATURE )
 	{ 
+		WriteLine("pNTHeader->Signature != IMAGE_NT_SIGNATURE");
 		return -1; 
 	}
 
@@ -51,13 +157,17 @@ int Change4GBValue(LPVOID baseaddress, bool set)
 	/////////////////////////////////////////////////////////////
 	if( IMAGE_NT_OPTIONAL_HDR32_MAGIC != pNTHeader->OptionalHeader.Magic )
 	{ 
+		WriteLine("IMAGE_NT_OPTIONAL_HDR32_MAGIC != pNTHeader->OptionalHeader.Magic");
 		return -1; 
 	}
 
 	int ret = pFileHeader->Characteristics;
 
 	DWORD old;
-	VirtualProtect(&pFileHeader->Characteristics, sizeof(pFileHeader->Characteristics), PAGE_READWRITE, &old);
+	if (!VirtualProtect(&pFileHeader->Characteristics, sizeof(pFileHeader->Characteristics), PAGE_READWRITE, &old)) {
+		WriteLine("VirtualProtect failed while attempting to set page readwrite");
+		return -1;
+	}
 
 	if (set)
 		pFileHeader->Characteristics |= IMAGE_FILE_LARGE_ADDRESS_AWARE;
@@ -65,7 +175,10 @@ int Change4GBValue(LPVOID baseaddress, bool set)
 		pFileHeader->Characteristics &= ~IMAGE_FILE_LARGE_ADDRESS_AWARE;
 
 	DWORD oldold;
-	VirtualProtect(&pFileHeader->Characteristics, sizeof(pFileHeader->Characteristics), old, &oldold);
+	if (!VirtualProtect(&pFileHeader->Characteristics, sizeof(pFileHeader->Characteristics), old, &oldold)) {
+		WriteLine("VirtualProtect failed while attempting to reset page protection");
+		return -2;
+	}
 
 	return ret;
 }
@@ -90,13 +203,11 @@ int mystricmp(const char *left, const char *right)
 
 REDIRECTABLE_FUNCTION_EX(HANDLE,WINAPI,CreateFileA,(LPCSTR lpFileName,DWORD dwDesiredAccess,DWORD dwShareMode,LPSECURITY_ATTRIBUTES lpSecurityAttributes,DWORD dwCreationDisposition,DWORD dwFlagsAndAttributes,HANDLE hTemplateFile))
 {
-	if (hOutput)
+	static int allow_output = 1;
+	if (allow_output)
 	{
-		DWORD numwritten;
-		WriteFile(hOutput,"CreateFile: ",12, &numwritten,0);
-		WriteFile(hOutput,lpFileName,mystrlen(lpFileName), &numwritten,0);
-		WriteFile(hOutput,"\n\r",2, &numwritten,0);
-		FlushFileBuffers(hOutput);
+		Write("CreateFile: ");
+		Write(lpFileName);
 	}
 
 	int len = 0;
@@ -105,23 +216,57 @@ REDIRECTABLE_FUNCTION_EX(HANDLE,WINAPI,CreateFileA,(LPCSTR lpFileName,DWORD dwDe
 
 	if (len == MAX_PATH) new_filename[MAX_PATH+1] = 0;
 
-	if (len >= 12 && !mystricmp(&lpFileName[len-12],"TESV.exe.4gb")) 
+	if (len >= 12 && !mystricmp(&lpFileName[len-8],".exe.4gb")) 
 	{
-		my_memcpy(&new_filename[len-12],"TESV.exe",9);
-		lpFileName = new_filename;		
-	}
+		new_filename[len-4] = 0;
+		lpFileName = new_filename;
 
-	if (hOutput)
-	{
 		DWORD numwritten;
-		WriteFile(hOutput,"         -> ",12, &numwritten,0);
-		WriteFile(hOutput,lpFileName,mystrlen(lpFileName), &numwritten,0);
-		WriteFile(hOutput,"\n\r",2, &numwritten,0);
-		FlushFileBuffers(hOutput);
+
+		if (!allow_output)
+		{
+			Write("CreateFile: ");
+			Write(lpFileName);
+		}
+		Write(" -> ");
+		Write(lpFileName);
+		allow_output=-1;
 	}
 
 
-	return CreateFileA_o(lpFileName,dwDesiredAccess,dwShareMode,lpSecurityAttributes,dwCreationDisposition,dwFlagsAndAttributes,hTemplateFile);
+	HANDLE result = CreateFileA_o(lpFileName,dwDesiredAccess,dwShareMode,lpSecurityAttributes,dwCreationDisposition,dwFlagsAndAttributes,hTemplateFile);
+
+	if (result == INVALID_HANDLE_VALUE) {
+		if (!allow_output) {
+			Write("CreateFile: ");
+			Write(lpFileName);
+		}
+		WriteLine(" - Failed");
+
+		LPVOID lpMsgBuf;
+		DWORD dw = GetLastError(); 
+
+		FormatMessage(
+			FORMAT_MESSAGE_ALLOCATE_BUFFER | 
+			FORMAT_MESSAGE_FROM_SYSTEM,
+			NULL,
+			dw,
+			MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+			(LPTSTR) &lpMsgBuf,
+			0, NULL );
+
+		Write((LPTSTR)lpMsgBuf);
+		LocalFree(lpMsgBuf);
+
+		if (allow_output==-1) allow_output = 0;
+	}
+
+	if (allow_output==-1) {
+		WriteLine();
+		allow_output=0;
+	}
+
+	return result;
 }
 
 void DwordToString(DWORD num, char string[16])
@@ -210,20 +355,59 @@ extern "C" BOOL WINAPI _DllMainCRTStartup( HMODULE hModule,
 	{
 		HMODULE executable = GetModuleHandle(NULL);
 
-		//TCHAR filename[MAX_PATH];
-		//GetModuleFileName(executable,filename,MAX_PATH);
+		TCHAR filename[MAX_PATH];
+		GetModuleFileName(executable,filename,MAX_PATH);
 		//MessageBox(0,filename,TEXT("Attach Debugger"),MB_OK);
 
 		//AllocConsole();
-		//hOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-		//hError = GetStdHandle(STD_ERROR_HANDLE);
+		if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+			MessageBox(0,filename,TEXT("Attach Debugger?"),MB_OK);
+		}
+		hOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+		hError = GetStdHandle(STD_ERROR_HANDLE);
 
-		Change4GBValue(LPVOID(executable),false);
+		// Write byte order marks...
+		if (hOutput && GetFileType(hOutput) == FILE_TYPE_DISK) {
+			LONG high = 0;
+			if (SetFilePointer(hOutput,0,&high,FILE_CURRENT) == 0 && high == 0)
+				Write("\xEF\xBB\xBF",hOutput);
+		}
+		if (hError && GetFileType(hError) == FILE_TYPE_DISK) {
+			LONG high = 0;
+			if (SetFilePointer(hError,0,&high,FILE_CURRENT) == 0 && high == 0)
+				Write("\xEF\xBB\xBF",hError);
+		}
 
+		Write("Executable filename: ");
+		WriteLine(filename);
+		Write("Executable address: 0x");
+		WriteLine((DWORD_PTR)executable);
+
+		WriteLine("Unsetting LAA Bit");
+		if (Change4GBValue(LPVOID(executable),false) < 0) {
+			WriteLine("Unsetting LAA bit failed");
+
+			if (LPVOID(executable) != LPVOID(0x4000000)) {
+				WriteLine("Attempting at default addresss 0x400000");
+
+				if (Change4GBValue(LPVOID(0x4000000),false) < 0) {
+					WriteLine("Second attempt at unsetting LAA bit failed");
+				}
+			} 
+		}
+
+		WriteLine("Getting Handle to KERNEL32");
 		HMODULE kernel32 = GetModuleHandle(TEXT("KERNEL32"));
-		
+		if (kernel32 == NULL) {
+			WriteLine("Failed to get module handle of KERNEL32");
+		}
+
+		WriteLine("Redirecting CreateFileA");
+
+		REDIRECT_FUNCTION(kernel32,CreateFileA);
+
 #ifndef USE_THREADED_GETTICKCOUNT
-		REDIRECT_FUNCTION(kernel32,GetTickCount,5);
+		REDIRECT_FUNCTION(kernel32,GetTickCount);
 #else
 		LARGE_INTEGER f;
 		if (QueryPerformanceFrequency(&f))
@@ -232,8 +416,6 @@ extern "C" BOOL WINAPI _DllMainCRTStartup( HMODULE hModule,
 			HANDLE thread = CreateThread(NULL,0,TimerThread,0,0,&tid);
 		}
 #endif
-
-		REDIRECT_FUNCTION(kernel32,CreateFileA,5);
 	}
     return TRUE;
 }
