@@ -101,8 +101,14 @@ template<typename T> struct TempArray {
 
 #define VA_ARG_WORKAROUND(p,...) p,__VA_ARGS__
 
+FARPROC WINAPI GetProcAddressWrap(
+  __in  HMODULE hModule,
+  __in  LPCSTR lpProcName,
+  __in  LPCSTR lpModuleName
+);
+
 #define REDIRECT_FUNCTION(module,name,...) \
-	RedirectFunction((LPBYTE) GetProcAddress(module,#name), (LPBYTE )&name##_new, VA_ARG_WORKAROUND((LPBYTE )&name##_o, TempArray<const WORD>::Construct(__VA_ARGS__)))
+	RedirectFunction((LPBYTE) GetProcAddressWrap(module,#name,#module), (LPBYTE )&name##_new, VA_ARG_WORKAROUND((LPBYTE )&name##_o, TempArray<const WORD>::Construct(__VA_ARGS__)))
 
 extern bool RedirectFunction(LPBYTE old_func, LPBYTE new_func, LPBYTE ret_func, TempArray<const WORD> check);
 

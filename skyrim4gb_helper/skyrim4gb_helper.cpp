@@ -122,13 +122,48 @@ void Write(int val,HANDLE h=hOutput)
 	DWORD numwritten;
 	WriteFile(h,ptr,str+31-ptr,&numwritten,0);
 }
-void WriteLine(int val,HANDLE h)
+void WriteLine(int val,HANDLE h=hOutput)
 {
 	if (h == 0) return;
 	Write(val,h);
 	WriteLine();
 }
 
+void WriteError(DWORD error, HANDLE h=hOutput)
+{
+	LPVOID lpMsgBuf;
+
+	FormatMessage(
+		FORMAT_MESSAGE_ALLOCATE_BUFFER | 
+		FORMAT_MESSAGE_FROM_SYSTEM,
+		NULL,
+		error,
+		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+		(LPTSTR) &lpMsgBuf,
+		0, NULL );
+
+	Write((LPTSTR)lpMsgBuf);
+	LocalFree(lpMsgBuf);
+}
+
+FARPROC WINAPI GetProcAddressWrap(
+  __in  HMODULE hModule,
+  __in  LPCSTR lpProcName,
+  __in  LPCSTR lpModuleName
+)
+{
+	FARPROC proc = GetProcAddress(hModule,lpProcName);
+	if (!proc) {
+		DWORD error = GetLastError();
+		Write("Failed to get Address of function ");
+		Write(lpProcName);
+		Write(" in ");
+		Write(lpModuleName);
+		Write(" -> ");
+		WriteError(error);
+	}
+	return proc;
+}
 
 int Change4GBValue(LPVOID baseaddress, bool set)
 {
@@ -165,7 +200,9 @@ int Change4GBValue(LPVOID baseaddress, bool set)
 
 	DWORD old;
 	if (!VirtualProtect(&pFileHeader->Characteristics, sizeof(pFileHeader->Characteristics), PAGE_READWRITE, &old)) {
+		DWORD error = GetLastError();
 		WriteLine("VirtualProtect failed while attempting to set page readwrite");
+		WriteError(error);
 		return -1;
 	}
 
@@ -176,7 +213,9 @@ int Change4GBValue(LPVOID baseaddress, bool set)
 
 	DWORD oldold;
 	if (!VirtualProtect(&pFileHeader->Characteristics, sizeof(pFileHeader->Characteristics), old, &oldold)) {
+		DWORD error = GetLastError();
 		WriteLine("VirtualProtect failed while attempting to reset page protection");
+		WriteError(error);
 		return -2;
 	}
 
@@ -221,8 +260,6 @@ REDIRECTABLE_FUNCTION_EX(HANDLE,WINAPI,CreateFileA,(LPCSTR lpFileName,DWORD dwDe
 		new_filename[len-4] = 0;
 		lpFileName = new_filename;
 
-		DWORD numwritten;
-
 		if (!allow_output)
 		{
 			Write("CreateFile: ");
@@ -237,26 +274,14 @@ REDIRECTABLE_FUNCTION_EX(HANDLE,WINAPI,CreateFileA,(LPCSTR lpFileName,DWORD dwDe
 	HANDLE result = CreateFileA_o(lpFileName,dwDesiredAccess,dwShareMode,lpSecurityAttributes,dwCreationDisposition,dwFlagsAndAttributes,hTemplateFile);
 
 	if (result == INVALID_HANDLE_VALUE) {
+		DWORD error = GetLastError(); 
+
 		if (!allow_output) {
 			Write("CreateFile: ");
 			Write(lpFileName);
 		}
-		WriteLine(" - Failed");
-
-		LPVOID lpMsgBuf;
-		DWORD dw = GetLastError(); 
-
-		FormatMessage(
-			FORMAT_MESSAGE_ALLOCATE_BUFFER | 
-			FORMAT_MESSAGE_FROM_SYSTEM,
-			NULL,
-			dw,
-			MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-			(LPTSTR) &lpMsgBuf,
-			0, NULL );
-
-		Write((LPTSTR)lpMsgBuf);
-		LocalFree(lpMsgBuf);
+		Write(" - Failed -> ");
+		WriteError(error);
 
 		if (allow_output==-1) allow_output = 0;
 	}
@@ -295,6 +320,7 @@ void DwordToString(DWORD num, char string[16])
 		}
 	}
 }
+#if 0
 #ifndef USE_THREADED_GETTICKCOUNT
 #include <mmsystem.h>
 REDIRECTABLE_FUNCTION_EX(DWORD,WINAPI,GetTickCount,())
@@ -328,8 +354,8 @@ DWORD CALLBACK TimerThread(LPVOID)
 	freq = f.QuadPart;
 	start -= (GetTickCount()*freq)/1000;
 
-	HMODULE kernel32 = GetModuleHandle(TEXT("KERNEL32"));
-	REDIRECT_FUNCTION(kernel32,GetTickCount,5);
+	HMODULE Kernel32 = GetModuleHandle(TEXT("KERNEL32"));
+	REDIRECT_FUNCTION(Kernel32,GetTickCount,5);
 
 	for(;;)
 	{
@@ -344,6 +370,7 @@ DWORD CALLBACK TimerThread(LPVOID)
 		Sleep(2);
 	}
 }
+#endif
 #endif
 
 extern "C" BOOL WINAPI _DllMainCRTStartup( HMODULE hModule,
@@ -396,18 +423,24 @@ extern "C" BOOL WINAPI _DllMainCRTStartup( HMODULE hModule,
 			} 
 		}
 
-		WriteLine("Getting Handle to KERNEL32");
-		HMODULE kernel32 = GetModuleHandle(TEXT("KERNEL32"));
-		if (kernel32 == NULL) {
-			WriteLine("Failed to get module handle of KERNEL32");
+		Write("Getting Handle to KERNEL32");
+		HMODULE Kernel32 = GetModuleHandle(TEXT("KERNEL32"));
+		if (Kernel32 == NULL) {
+			DWORD error = GetLastError();
+			Write(" - Failed -> ");
+			WriteError(error);
+		}
+		else {
+			WriteLine(" - Succeeded");
 		}
 
 		WriteLine("Redirecting CreateFileA");
+		REDIRECT_FUNCTION(Kernel32,CreateFileA);
 
-		REDIRECT_FUNCTION(kernel32,CreateFileA);
-
+#if 0
 #ifndef USE_THREADED_GETTICKCOUNT
-		REDIRECT_FUNCTION(kernel32,GetTickCount);
+		WriteLine("Redirecting GetTickCount");
+		REDIRECT_FUNCTION(Kernel32,GetTickCount);
 #else
 		LARGE_INTEGER f;
 		if (QueryPerformanceFrequency(&f))
@@ -416,6 +449,17 @@ extern "C" BOOL WINAPI _DllMainCRTStartup( HMODULE hModule,
 			HANDLE thread = CreateThread(NULL,0,TimerThread,0,0,&tid);
 		}
 #endif
+#endif
+		Write("Attempting to load SKSE");
+		HMODULE skse = LoadLibrary(TEXT("skse_steam_loader.dll"));
+		if (skse == NULL) {
+			DWORD error = GetLastError();
+			Write(" - Failed -> ");
+			WriteError(error);
+		}
+		else {
+			WriteLine(" - Succeeded");
+		}
 	}
     return TRUE;
 }
