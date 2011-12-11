@@ -97,6 +97,8 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\conio.cpp" />
+    <ClCompile Include="..\injection.cpp" />
+    <ClCompile Include="..\miscfuncs.cpp" />
     <ClCompile Include="skyrim4gb.cpp" />
     <ClCompile Include="stdafx.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
@@ -105,6 +107,8 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\conio.h" />
+    <ClInclude Include="..\injection.h" />
+    <ClInclude Include="..\miscfuncs.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="stdafx.h" />
   </ItemGroup>

@@ -39,16 +39,16 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #define _WIN32_IE 0x0600	// Change this to the appropriate value to target other versions of IE.
 #endif
 
+#define PSAPI_VERSION 1
+
 // Windows Header Files:
 #include <windows.h>
+#include <Psapi.h>
 
 
 // TODO: reference additional headers your program requires here
 
-extern int mystricmp(const char *left, const char *right);
-
-extern void DwordToString(DWORD num, char string[16]);
 
 #include "redirector.h"
 #include "conio.h"
-
+#include "miscfuncs.h"

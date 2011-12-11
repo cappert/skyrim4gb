@@ -18,13 +18,46 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 #include "stdafx.h"
+#include "injection.h"
 
 #ifdef _MANAGED
 #pragma managed(push, off)
 #endif
 
 HMODULE executable;
+MODULEINFO executable_info;
 TCHAR exe_filename[MAX_PATH];
+
+static Injection *injection = 0;
+
+// This is now a stub as the loader now does significantly more compliated 
+// stuff now. The thread isn't created at LoadLibrary any more. Code that calls
+// LoadLibrary, GetProcessAddress and the new CompleteInjection function is 
+// injected into the processes address space and that thread is created at 
+// that code. 
+extern "C" BOOL WINAPI _DllMainCRTStartup( HMODULE hModule,
+                       DWORD  ul_reason_for_call,
+                       LPVOID lpReserved
+					 )
+{
+	switch(ul_reason_for_call)	
+	{
+    case DLL_PROCESS_ATTACH:
+      //  For optimization.
+      DisableThreadLibraryCalls( hModule );
+      break;
+
+	case DLL_PROCESS_DETACH:
+		// Release our resources
+		if (injection) {
+			VirtualFree(injection->ADDR_buffer,0,MEM_RELEASE);
+			injection = 0;
+		}
+		break;
+	}
+
+    return TRUE;
+}
 
 FARPROC WINAPI GetProcAddressWrap(
   __in  HMODULE hModule,
@@ -35,12 +68,9 @@ FARPROC WINAPI GetProcAddressWrap(
 	FARPROC proc = GetProcAddress(hModule,lpProcName);
 	if (!proc) {
 		DWORD error = GetLastError();
-		Write("Failed to get Address of function ");
-		Write(lpProcName);
-		Write(" in ");
-		Write(lpModuleName);
-		Write(" -> ");
-		WriteError(error);
+		Console->Write("Failed to get Address of function ")->Write(lpProcName)
+			   ->Write(" in ")->Write(lpModuleName)
+			   ->Write(" -> ")->WriteError(error);
 	}
 	return proc;
 }
@@ -50,7 +80,7 @@ int Change4GBValue(LPVOID baseaddress, bool set)
 	PIMAGE_DOS_HEADER pDOSHeader = static_cast<PIMAGE_DOS_HEADER>( baseaddress );
 	if( pDOSHeader->e_magic != IMAGE_DOS_SIGNATURE )
 	{ 
-		WriteLine("pDOSHeader->e_magic != IMAGE_DOS_SIGNATURE");
+		Console->WriteLine("pDOSHeader->e_magic != IMAGE_DOS_SIGNATURE");
 		return -1; 
 	}
 
@@ -59,7 +89,7 @@ int Change4GBValue(LPVOID baseaddress, bool set)
 
 	if(pNTHeader->Signature != IMAGE_NT_SIGNATURE )
 	{ 
-		WriteLine("pNTHeader->Signature != IMAGE_NT_SIGNATURE");
+		Console->WriteLine("pNTHeader->Signature != IMAGE_NT_SIGNATURE");
 		return -1; 
 	}
 
@@ -72,7 +102,7 @@ int Change4GBValue(LPVOID baseaddress, bool set)
 	/////////////////////////////////////////////////////////////
 	if( IMAGE_NT_OPTIONAL_HDR32_MAGIC != pNTHeader->OptionalHeader.Magic )
 	{ 
-		WriteLine("IMAGE_NT_OPTIONAL_HDR32_MAGIC != pNTHeader->OptionalHeader.Magic");
+		Console->WriteLine("IMAGE_NT_OPTIONAL_HDR32_MAGIC != pNTHeader->OptionalHeader.Magic");
 		return -1; 
 	}
 
@@ -81,8 +111,7 @@ int Change4GBValue(LPVOID baseaddress, bool set)
 	DWORD old;
 	if (!VirtualProtect(&pFileHeader->Characteristics, sizeof(pFileHeader->Characteristics), PAGE_READWRITE, &old)) {
 		DWORD error = GetLastError();
-		WriteLine("VirtualProtect failed while attempting to set page readwrite");
-		WriteError(error);
+		Console->WriteLine("VirtualProtect failed while attempting to set page readwrite")->WriteError(error);
 		return -1;
 	}
 
@@ -94,71 +123,54 @@ int Change4GBValue(LPVOID baseaddress, bool set)
 	DWORD oldold;
 	if (!VirtualProtect(&pFileHeader->Characteristics, sizeof(pFileHeader->Characteristics), old, &oldold)) {
 		DWORD error = GetLastError();
-		WriteLine("VirtualProtect failed while attempting to reset page protection");
-		WriteError(error);
+		Console->WriteLine("VirtualProtect failed while attempting to reset page protection")->WriteError(error);
 		return -2;
 	}
 
 	return ret;
 }
 
-	
-int mystricmp(const char *left, const char *right)
-{
-	while (*left && *right)
-	{
-		int l = *left++;
-		int r = *right++;
-
-		if (l >= 'a' && l <= 'z') l -= 0x20;
-		if (r >= 'a' && r <= 'z') r -= 0x20;
-
-		int res = l - r;
-		if (res != 0) return res;
-	}
-
-	return *left - *right;
-}
-int mystricmp(const wchar_t *left, const wchar_t *right)
-{
-	while (*left && *right)
-	{
-		int l = *left++;
-		int r = *right++;
-
-		if (l >= 'a' && l <= 'z') l -= 0x20;
-		if (r >= 'a' && r <= 'z') r -= 0x20;
-
-		int res = l - r;
-		if (res != 0) return res;
-	}
-
-	return *left - *right;
-}
 
 REDIRECTABLE_FUNCTION_EX(DWORD,WINAPI,GetModuleFileNameA,(__in_opt HMODULE hModule, __out LPSTR lpFilename, __in DWORD nSize))
 {
-	DWORD res = GetModuleFileNameA_o(hModule, lpFilename, nSize);
+	if (hModule == executable || hModule == NULL) {
+		if (nSize) {
+			INT codepage = AreFileApisANSI()?CP_ACP:CP_OEMCP;
 
-	if (executable == hModule) {
-		if (res) {
-			if (res >= 8 && !mystricmp(&exe_filename[res-8],TEXT(".exe.4gb"))) 
-			{
-				res-=4;
-				if (lpFilename) lpFilename[res] = 0;
+			int res = WideCharToMultiByte(codepage,0,injection->szOriginalName,-1,0,0,NULL,NULL);
+
+			LPSTR conveted = (LPSTR) LocalAlloc(LMEM_FIXED,res);
+			res = WideCharToMultiByte(codepage,0,injection->szOriginalName,-1,conveted,res,NULL,NULL);
+
+			for (int i = 0 ; i < res && i < nSize; i++)
+				lpFilename[i] = conveted[i];
+			lpFilename[nSize-1] = 0;
+
+			LocalFree((HLOCAL) conveted);
+
+			if (res > nSize) {
+				SetLastError(ERROR_INSUFFICIENT_BUFFER);
+				return nSize;			
 			}
+			return res-1;
+		}
+		else {
+			SetLastError(ERROR_INSUFFICIENT_BUFFER);
+			return 0;
 		}
 	}
+	else {
+		return GetModuleFileNameA_o(hModule, lpFilename, nSize);
 
-	return res;
+	}
 }
 REDIRECTABLE_FUNCTION_EX(DWORD,WINAPI,GetModuleFileNameW,(__in_opt HMODULE hModule, __out LPWSTR lpFilename, __in DWORD nSize))
 {
 	DWORD res = GetModuleFileNameW_o(hModule, lpFilename, nSize);
 
-	if (executable == hModule) {
+	if (hModule == executable || hModule == NULL) {
 		if (res) {
-			if (res >= 8 && !mystricmp(&exe_filename[res-8],TEXT(".exe.4gb"))) 
+			if (res >= 8 && !my_stricmp(&exe_filename[res-8],TEXT(".exe.4gb"))) 
 			{
 				res-=4;
 				if (lpFilename) lpFilename[res] = 0;
@@ -175,8 +187,8 @@ REDIRECTABLE_FUNCTION_EX(HANDLE,WINAPI,CreateFileA,(LPCSTR lpFileName,DWORD dwDe
 	static int allow_output = 1;
 	if (allow_output)
 	{
-		Write("CreateFile: ");
-		Write(lpFileName);
+		Console->Write("CreateFile: ");
+		Console->Write(lpFileName);
 	}
 
 	int len = 0;
@@ -185,18 +197,18 @@ REDIRECTABLE_FUNCTION_EX(HANDLE,WINAPI,CreateFileA,(LPCSTR lpFileName,DWORD dwDe
 
 	if (len == MAX_PATH) new_filename[MAX_PATH+1] = 0;
 
-	if (len >= 12 && !mystricmp(&lpFileName[len-8],".exe.4gb")) 
+	if (len >= 12 && !my_stricmp(&lpFileName[len-8],".exe.4gb")) 
 	{
 		new_filename[len-4] = 0;
 		lpFileName = new_filename;
 
 		if (!allow_output)
 		{
-			Write("CreateFile: ");
-			Write(lpFileName);
+			Console->Write("CreateFile: ");
+			Console->Write(lpFileName);
 		}
-		Write(" -> ");
-		Write(lpFileName);
+		Console->Write(" -> ");
+		Console->Write(lpFileName);
 		allow_output=-1;
 	}
 
@@ -207,49 +219,21 @@ REDIRECTABLE_FUNCTION_EX(HANDLE,WINAPI,CreateFileA,(LPCSTR lpFileName,DWORD dwDe
 		DWORD error = GetLastError(); 
 
 		if (!allow_output) {
-			Write("CreateFile: ");
-			Write(lpFileName);
+			Console->Write("CreateFile: ")->Write(lpFileName);
 		}
-		Write(" - Failed -> ");
-		WriteError(error);
+		Console->Write(" - Failed -> ")->WriteError(error);
 
 		if (allow_output==-1) allow_output = 0;
 	}
 
 	if (allow_output==-1) {
-		WriteLine();
+		Console->WriteLine();
 		allow_output=0;
 	}
 
 	return result;
 }
 
-void DwordToString(DWORD num, char string[16])
-{
-	int count = 0;
-	DWORD t = num;
-
-	while (t)
-	{
-		count++;
-		t /= 10;				
-	}
-
-	if (count == 0)
-	{
-		string[0] = '0';
-		string[1] = 0;
-	}
-	else
-	{
-		string[count] = 0;
-		while (num)
-		{
-			string[--count] = (num%10) + '0';
-			num /= 10;				
-		}
-	}
-}
 #if 0
 #ifndef USE_THREADED_GETTICKCOUNT
 #include <mmsystem.h>
@@ -303,102 +287,108 @@ DWORD CALLBACK TimerThread(LPVOID)
 #endif
 #endif
 
-extern "C" BOOL WINAPI _DllMainCRTStartup( HMODULE hModule,
-                       DWORD  ul_reason_for_call,
-                       LPVOID lpReserved
-					 )
+
+extern "C" __declspec(dllexport) INT WINAPI CompleteInjection(Injection *injection)
 {
-	if (ul_reason_for_call == DLL_PROCESS_ATTACH)
-	{
-		executable = GetModuleHandle(NULL);
+	if (::injection) return -1;
+	::injection = injection;
+	executable = GetModuleHandle(NULL);
+	GetModuleInformation(GetCurrentProcess(),executable,&executable_info,sizeof(executable_info));
 
-		GetModuleFileName(executable,exe_filename,MAX_PATH);
-		//MessageBox(0,exe_filename,TEXT("Attach Debugger"),MB_OK);
+	GetModuleFileName(executable,exe_filename,MAX_PATH);
+	//MessageBox(0,exe_filename,TEXT("Attach Debugger"),MB_OK);
 
-		//AllocConsole();
-		if (AttachConsole(ATTACH_PARENT_PROCESS)) {
-			MessageBox(0,exe_filename,TEXT("Attach Debugger?"),MB_OK);
-		}
-		hOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-		hError = GetStdHandle(STD_ERROR_HANDLE);
+	//AllocConsole();
+	if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+		MessageBox(0,exe_filename,TEXT("Attach Debugger?"),MB_OK);
+	}
+	Console->h = GetStdHandle(STD_OUTPUT_HANDLE);
+	Console->Error->h = GetStdHandle(STD_ERROR_HANDLE);
 
-		// Write byte order marks...
-		if (hOutput && GetFileType(hOutput) == FILE_TYPE_DISK) {
-			LONG high = 0;
-			if (SetFilePointer(hOutput,0,&high,FILE_CURRENT) == 0 && high == 0)
-				Write("\xEF\xBB\xBF",hOutput);
-		}
-		if (hError && GetFileType(hError) == FILE_TYPE_DISK) {
-			LONG high = 0;
-			if (SetFilePointer(hError,0,&high,FILE_CURRENT) == 0 && high == 0)
-				Write("\xEF\xBB\xBF",hError);
-		}
+	// Console->Write byte order marks...
+	if (Console->h && GetFileType(Console->h) == FILE_TYPE_DISK) {
+		LONG high = 0;
+		if (SetFilePointer(Console->h,0,&high,FILE_CURRENT) == 0 && high == 0)
+			Console->Write("\xEF\xBB\xBF");
+	}
+	if (Console->Error->h && GetFileType(Console->Error->h) == FILE_TYPE_DISK) {
+		LONG high = 0;
+		if (SetFilePointer(Console->Error->h,0,&high,FILE_CURRENT) == 0 && high == 0)
+			Console->Error->Write("\xEF\xBB\xBF");
+	}
 
-		WriteLine("skyrim4gb_helper: successfully injected");
+	Console->WriteLine("skyrim4gb_helper: successfully injected");
 
-		Write("Executable filename: ");
-		WriteLine(exe_filename);
-		Write("Executable address: 0x");
-		WriteLine((DWORD_PTR)executable);
+	Console->Write("Executable filename: ")->WriteLine(exe_filename);
+	Console->Write("Executable address: 0x")->WriteLine((DWORD_PTR)executable_info.lpBaseOfDll);
 
-		WriteLine("Unsetting LAA Bit");
-		if (Change4GBValue(LPVOID(executable),false) < 0) {
-			WriteLine("Unsetting LAA bit failed");
+	Console->WriteLine("Unsetting LAA Bit");
+	if (Change4GBValue(executable_info.lpBaseOfDll,false) < 0) {
+		Console->WriteLine("Unsetting LAA bit failed");
 
-			if (LPVOID(executable) != LPVOID(0x4000000)) {
-				WriteLine("Attempting at default addresss 0x400000");
+		if (LPVOID(executable) != LPVOID(0x4000000)) {
+			Console->WriteLine("Attempting at default addresss 0x400000");
 
-				if (Change4GBValue(LPVOID(0x4000000),false) < 0) {
-					WriteLine("Second attempt at unsetting LAA bit failed");
-				}
-			} 
-		}
+			if (Change4GBValue(LPVOID(0x4000000),false) < 0) {
+				Console->WriteLine("Second attempt at unsetting LAA bit failed");
+			}
+		} 
+	}
 
-		Write("Getting Handle to KERNEL32");
-		HMODULE Kernel32 = GetModuleHandle(TEXT("KERNEL32"));
-		if (Kernel32 == NULL) {
-			DWORD error = GetLastError();
-			Write(" - Failed -> ");
-			WriteError(error);
-		}
-		else {
-			WriteLine(" - Succeeded");
-		}
+	Console->Write("Getting Handle to KERNEL32");
+	HMODULE Kernel32 = GetModuleHandle(TEXT("KERNEL32"));
+	if (Kernel32 == NULL) {
+		DWORD error = GetLastError();
+		Console->Write(" - Failed -> ")->WriteError(error);
+	}
+	else {
+		Console->WriteLine(" - Succeeded");
+	}
 
-		WriteLine("Redirecting GetModuleFileNameA");
-		if (!REDIRECT_FUNCTION(Kernel32,GetModuleFileNameA)) {
-			WriteLine("Falling back to CreateFileA redirection");
-			REDIRECT_FUNCTION(Kernel32,CreateFileA);
-		}
+	Console->WriteLine("Redirecting GetModuleFileNameA");
+	if (!REDIRECT_FUNCTION(Kernel32,GetModuleFileNameA)) {
+		Console->WriteLine("Falling back to CreateFileA redirection");
+		REDIRECT_FUNCTION(Kernel32,CreateFileA);
+	}
 
 #if 0
 #ifndef USE_THREADED_GETTICKCOUNT
-		WriteLine("Redirecting GetTickCount");
-		REDIRECT_FUNCTION(Kernel32,GetTickCount);
+	Console->WriteLine("Redirecting GetTickCount");
+	REDIRECT_FUNCTION(Kernel32,GetTickCount);
 #else
-		LARGE_INTEGER f;
-		if (QueryPerformanceFrequency(&f))
-		{
-			DWORD tid;
-			HANDLE thread = CreateThread(NULL,0,TimerThread,0,0,&tid);
-		}
-#endif
-#endif
-		Write("Attempting to load SKSE");
-		HMODULE skse = LoadLibrary(TEXT("skse_steam_loader.dll"));
-		if (skse == NULL) {
-			DWORD error = GetLastError();
-			Write(" - Failed -> ");
-			WriteError(error);
-		}
-		else {
-			WriteLine(" - Succeeded");
-		}
-
-		WriteLine("skyrim4gb_helper: returning from DLLStartup");
+	LARGE_INTEGER f;
+	if (QueryPerformanceFrequency(&f))
+	{
+		DWORD tid;
+		HANDLE thread = CreateThread(NULL,0,TimerThread,0,0,&tid);
 	}
-    return TRUE;
+#endif
+#endif
+	if (injection->szExtraDLLs && *injection->szExtraDLLs) {
+		Console->WriteLine("Loading additional DLLs");
+
+		TCHAR *extra_dll = injection->szExtraDLLs;
+
+		while (*extra_dll) {
+			Console->Write("Attempting to load ")->Write(extra_dll);
+			HMODULE skse = LoadLibrary(extra_dll);
+			if (skse == NULL) {
+				DWORD error = GetLastError();
+				Console->Write(" - Failed -> ")->WriteError(error);
+			}
+			else {
+				Console->WriteLine(" - Succeeded");
+			}
+
+			extra_dll += my_strlen(extra_dll)+1;
+		}
+	}
+
+	Console->WriteLine("skyrim4gb_helper: returning from CompleteInjection");
+
+	return ERROR_SUCCESS;
 }
+
 
 #ifdef _MANAGED
 #pragma managed(pop)

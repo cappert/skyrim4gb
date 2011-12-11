@@ -18,41 +18,52 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 #include "stdafx.h"
-	
-HANDLE hOutput = 0;
-HANDLE hError = 0;
+#include "conio.h"
 
+static ConIO sError = { 
+	(HANDLE) 0,  &sError
+};
+static ConIO sOutput = { 
+	(HANDLE) 0,  &sError
+};
+ConIO *Console = { 
+	&sOutput
+};
 
-void WriteLine(HANDLE h) 
+ConIO* ConIO::WriteLine() 
 {
-	if (h == 0) return;
+	if (h == 0) return this;
 
 	DWORD numwritten;
 	WriteFile(h,"\r\n",2, &numwritten,0);
-	FlushFileBuffers(hOutput);
+	FlushFileBuffers(h);
+	return this;
 }
 
-void Write(const char *str,HANDLE h) 
+ConIO* ConIO::Write(const char *str) 
 {
-	if (h == 0) return;
+	if (h == 0) return this;
 
 	DWORD len = 0;
 	while(str[len]) ++len;
 
 	DWORD numwritten;
 	WriteFile(h,str,len,&numwritten,0);
+
+	return this;
 }
 
-void WriteLine(const char *str, HANDLE h) 
+ConIO* ConIO::WriteLine(const char *str) 
 {
-	if (h == 0) return;
-	Write(str,h);
-	WriteLine(h);
+	if (h == 0) return this;
+	Write(str);
+	WriteLine();
+	return this;
 }
 
-void Write(const wchar_t *str,HANDLE h) 
+ConIO* ConIO::Write(const wchar_t *str) 
 {
-	if (h == 0) return;
+	if (h == 0) return this;
 
 	DWORD numwritten;
 
@@ -70,22 +81,25 @@ void Write(const wchar_t *str,HANDLE h)
 
 		LocalFree((HLOCAL) utf8);
 	}
+	return this;
 }
 
-void WriteLine(const wchar_t *str, HANDLE h) 
+ConIO* ConIO::WriteLine(const wchar_t *str) 
 {
-	if (h == 0) return;
-	Write(str,h);
-	WriteLine(h);
+	if (h == 0) return this;
+	Write(str);
+	WriteLine();
+	return this;
 }
-void Write(DWORD_PTR val,HANDLE h) 
+ConIO* ConIO::Write(DWORD_PTR val) 
 {
-	if (h == 0) return;
+	if (h == 0) return this;
 
 	char str[32];
 	char *ptr = str+32;
 	*--ptr=0;
-	while (val) {
+	if (val == 0) *--ptr='0';
+	else while (val) {
 		int nibble = val&0xF;
 		val >>= 4;
 
@@ -95,39 +109,45 @@ void Write(DWORD_PTR val,HANDLE h)
 
 	DWORD numwritten;
 	WriteFile(h,ptr,str+31-ptr,&numwritten,0);
+	return this;
 }
-void WriteLine(DWORD_PTR val,HANDLE h) 
+ConIO* ConIO::WriteLine(DWORD_PTR val) 
 {
-	if (h == 0) return;
-	Write(val,h);
-	WriteLine(h);
+	if (h == 0) return this;
+	Write(val);
+	WriteLine();
+	return this;
 }
-void Write(int val,HANDLE h)
+ConIO* ConIO::Write(int val)
 {
-	if (h == 0) return;
+	if (h == 0) return this;
 
 	bool wasneg = val<0;
 	if (wasneg) val = -val;
 	char str[32];
 	char *ptr = str+32;
 	*--ptr=0;
-	while (val) {
+	if (val == 0) *--ptr='0';
+	else while (val) {
 		*--ptr = '0' + val%10;
 		val /= 10;
 	}
 	if (wasneg) *--ptr = '-';
 	DWORD numwritten;
 	WriteFile(h,ptr,str+31-ptr,&numwritten,0);
+	return this;
 }
-void WriteLine(int val,HANDLE h)
+ConIO* ConIO::WriteLine(int val)
 {
-	if (h == 0) return;
-	Write(val,h);
-	WriteLine(h);
+	if (h == 0) return this;
+	Write(val);
+	WriteLine();
+	return this;
 }
 
-void WriteError(DWORD error, HANDLE h)
+ConIO* ConIO::WriteError(DWORD error)
 {
+	if (h == 0) return this;
 	LPVOID lpMsgBuf;
 
 	FormatMessage(
@@ -139,7 +159,22 @@ void WriteError(DWORD error, HANDLE h)
 		(LPTSTR) &lpMsgBuf,
 		0, NULL );
 
-	Write((LPTSTR)lpMsgBuf,h);
+	Write((LPTSTR)lpMsgBuf);
 	LocalFree(lpMsgBuf);
+	return this;
 }
 
+ConIO* ConIO::WriteError(const char *str, DWORD error)
+{
+	if (h == 0) return this;
+	Write(str);
+	WriteError(error);
+	return this;
+}
+ConIO* ConIO::WriteError(const wchar_t *str, DWORD error)
+{
+	if (h == 0) return this;
+	Write(str);
+	WriteError(error);
+	return this;
+}

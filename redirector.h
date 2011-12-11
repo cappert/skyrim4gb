@@ -42,6 +42,15 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 // If using this, ret_func will NOT be changed!
 #define DONTCARE_PROLOG 0xFF00, 0xFF00, 0xFF00, 0xFF00, 0xFF00
 
+
+// nop
+// nop
+// nop
+// nop
+// nop
+// mov     edi, edi
+#define HOTPATCH_PROLOG_FULL 0x90, 0x90, 0x90, 0x90, 0x90, 0x8B, 0xFF
+
 #define LOTS_OF_NOPS(addr) __asm { \
 		__asm mov eax, addr __asm mov ecx, eax \
 		__asm mov edx, eax \

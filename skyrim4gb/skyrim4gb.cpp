@@ -23,13 +23,35 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #include <mmsystem.h>
 #include <shlwapi.h>
 #include <shlobj.h>
+#include <Psapi.h>
+#include "injection.h"
+
+TCHAR this_exe[MAX_PATH+1];
+TCHAR this_exe_dir[MAX_PATH+1];
+LPTSTR this_exe_filename;
+
+TCHAR tesv_exe[MAX_PATH+1] = TEXT("");
+TCHAR tesv_exe_dir[MAX_PATH+1] = TEXT("");
+LPTSTR tesv_exe_filename;
+
+TCHAR tesv_exe_4gb[MAX_PATH+1] = TEXT("");
+TCHAR tesv_exe_4gb_dir[MAX_PATH+1] = TEXT("");
+LPTSTR tesv_exe_4gb_filename;
+
+LPTSTR launch_parameters = TEXT("");
+
+TCHAR SteamAPPId[16] = TEXT("");
+
+struct ExtraDLL {
+	TCHAR file[MAX_PATH+1];
+	ExtraDLL *next;
+};
+ExtraDLL *extra_dlls = 0;
+ExtraDLL *extra_dlls_last = 0;
 
 void LogMessageBox(__in LPCTSTR lpText, __in  LPCTSTR lpCaption, __in  UINT uType)
 {
-	Write("    Loader: ");
-	Write(lpCaption);
-	Write(" - ");
-	WriteLine(lpText);
+	Console->Write("    Loader: ")->Write(lpCaption)->Write(" - ")->WriteLine(lpText);
 
 	MessageBox(0,lpText,lpCaption,uType);
 }
@@ -41,7 +63,7 @@ int Change4GBValue(LPVOID baseaddress, int set, DWORD size)
 	PIMAGE_DOS_HEADER pDOSHeader = static_cast<PIMAGE_DOS_HEADER>( baseaddress );
 	if( pDOSHeader->e_magic != IMAGE_DOS_SIGNATURE )
 	{ 
-		WriteLine("    Loader: pDOSHeader->e_magic != IMAGE_DOS_SIGNATURE");
+		Console->WriteLine("    Loader: pDOSHeader->e_magic != IMAGE_DOS_SIGNATURE");
 		return -1; 
 	}
 
@@ -50,7 +72,7 @@ int Change4GBValue(LPVOID baseaddress, int set, DWORD size)
 
 	if(pNTHeader->Signature != IMAGE_NT_SIGNATURE )
 	{ 
-		WriteLine("    Loader: pNTHeader->Signature != IMAGE_NT_SIGNATURE");
+		Console->WriteLine("    Loader: pNTHeader->Signature != IMAGE_NT_SIGNATURE");
 		return -1; 
 	}
 
@@ -63,7 +85,7 @@ int Change4GBValue(LPVOID baseaddress, int set, DWORD size)
 	/////////////////////////////////////////////////////////////
 	if( IMAGE_NT_OPTIONAL_HDR32_MAGIC != pNTHeader->OptionalHeader.Magic )
 	{ 
-		WriteLine("    Loader: IMAGE_NT_OPTIONAL_HDR32_MAGIC != pNTHeader->OptionalHeader.Magic");
+		Console->WriteLine("    Loader: IMAGE_NT_OPTIONAL_HDR32_MAGIC != pNTHeader->OptionalHeader.Magic");
 		return -1; 
 	}
 
@@ -126,7 +148,7 @@ int Change4GBValue(LPVOID baseaddress, int set, DWORD size)
 		checksum = (checksum&0xFFFF) + size + (checksum>>16);
 
 		if (checksum != pOptionalHeader->CheckSum) {
-			WriteLine("    Loader: checksum != pOptionalHeader->CheckSum");
+			Console->WriteLine("    Loader: checksum != pOptionalHeader->CheckSum");
 			return -1;
 		}
 	}
@@ -155,9 +177,16 @@ void ShowError(LPTSTR title,DWORD error=GetLastError())
 
 int Change4GBValue(LPTSTR filename, int set, WIN32_FILE_ATTRIBUTE_DATA *newatts=0)
 {
+	HANDLE hFile = INVALID_HANDLE_VALUE;
 	/////////////////////////////////////////////////////////////
-	HANDLE hFile = CreateFile( filename, GENERIC_READ|(set>=0?GENERIC_WRITE:0), FILE_SHARE_READ,
-		NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+	int limit = set?10:1;
+
+	while(limit && hFile==INVALID_HANDLE_VALUE) {
+		hFile = CreateFile( filename, GENERIC_READ|(set>=0?GENERIC_WRITE:0), FILE_SHARE_READ,
+			NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+
+		if (limit-- && hFile==INVALID_HANDLE_VALUE) Sleep(1000);
+	}
 	if ( hFile == INVALID_HANDLE_VALUE )
 	{
 		ShowError(TEXT("Error Opening executable"));
@@ -196,54 +225,6 @@ int Change4GBValue(LPTSTR filename, int set, WIN32_FILE_ATTRIBUTE_DATA *newatts=
 	if (original == -1) return -2;
 
 	return original;
-}
-
-LPTSTR FindLast(LPTSTR str, TCHAR c)
-{
-	LPTSTR last = 0;
-
-	while(*str)
-	{
-		if (*str == c) last = str;
-		str++;
-	}
-
-	return last;
-}
-
-LPCTSTR FindLast(LPCTSTR str, TCHAR c)
-{
-	LPCTSTR last = 0;
-
-	while(*str)
-	{
-		if (*str == c) last = str;
-		str++;
-	}
-
-	return last;
-}
-
-LPTSTR FindFirst(LPTSTR str, TCHAR c)
-{
-	while(*str)
-	{
-		if (*str == c) return str;
-		str++;
-	}
-
-	return 0;
-}
-
-LPCTSTR FindFirst(LPCTSTR str, TCHAR c)
-{
-	while(*str)
-	{
-		if (*str == c) return str;
-		str++;
-	}
-
-	return 0;
 }
 
 INT_PTR CALLBACK DialogFunc(HWND hwndDlg,
@@ -307,6 +288,152 @@ bool operator !=(const FILETIME &left, const FILETIME &right){
 	return left.dwHighDateTime != right.dwHighDateTime || left.dwLowDateTime!= right.dwLowDateTime; 
 }
 
+bool CheckAllFilenames()
+{
+	Console->Write("    Loader: Making sure original and LAA exe are not the same file");
+	if (!CheckFilenames(tesv_exe, tesv_exe_4gb)) {
+		Console->WriteLine(" - They are");
+		LogMessageBox(TEXT("Files for original and LAA exe must be different"), TEXT("Error"), MB_ICONERROR);
+		return false;
+	}
+	else {
+		Console->WriteLine(" - They aren't");
+	}
+
+	LPTSTR exes[] = { tesv_exe, tesv_exe_4gb };
+
+	for (int i = 0; i < sizeof(exes)/sizeof(exes[0]); i++) {
+
+		Console->Write("    Loader: Making sure this executable is not ");
+		Console->Write(exes[i]);
+
+		if (!CheckFilenames(this_exe,exes[i]))
+		{
+			Console->WriteLine(" - It is");
+			if (dialog) PostMessage(dialog,WM_USER,0,0);
+			LogMessageBox(TEXT("Skyrim4GB loader must not be named the same as the original or LAA exe"), TEXT("Error"), MB_ICONERROR);
+			return false;
+		}
+		else
+			Console->WriteLine(" - It isn't");
+	}
+
+	return true;
+}
+
+void ParseArgument(LPTSTR &commandLine, LPTSTR result) {
+
+	// Get the argument
+	TCHAR c;
+	bool quoted = false;
+	while (c = *commandLine) {
+		++commandLine;
+
+		if (c == '"') {
+			quoted = !quoted;
+			continue;
+		}
+		else if (!quoted && (c == ' ' || c == '\t')) {
+			break;
+		}
+		*result++ = c;
+	}
+
+	// Skip past whitespace at the end of the argument getting us to the start of the next one
+	while (c = *commandLine)  {
+		if (c != ' ' && c != '\t') break;
+		++commandLine;
+	}
+
+	*result = 0;
+}
+
+void ParseCommandLine(LPTSTR commandLine) {
+	LPTSTR temp = (LPTSTR) LocalAlloc(0,my_strlen(commandLine)*sizeof(TCHAR));
+
+	// Skip path first argument (executable name - could be anything or nothing)
+	ParseArgument(commandLine,temp);
+
+	bool noskse = false;
+
+	while (*commandLine) {
+		ParseArgument(commandLine,temp);
+
+		// Start of arguments to the launched executable
+		if (!my_stricmp(temp,TEXT("--"))) {
+			break;
+		}
+		// Path of original game executable
+		else if (!my_stricmp(temp,TEXT("-exe"))) {
+			if (!*commandLine) break;
+			Console->Write("            exe = ");
+
+			ParseArgument(commandLine,temp);
+
+			my_strcpy_s(tesv_exe,temp);
+			Console->WriteLine(tesv_exe);
+		}
+		// Path of Large Address Aware executable that gets created
+		else if (!my_stricmp(temp,TEXT("-laaexe"))) {
+			if (!*commandLine) break;
+			Console->Write("            laaexe = ");
+			ParseArgument(commandLine,temp);
+
+			my_strcpy_s(tesv_exe_4gb,temp);
+			Console->WriteLine(tesv_exe_4gb);
+		}
+		// Don't load skse
+		else if (!my_stricmp(temp,TEXT("-noskse"))) {
+			Console->WriteLine("            noskse");
+			noskse = true;
+		}
+		else if (!my_stricmp(temp,TEXT("-extradll"))) {
+			if (!*commandLine) break;
+			Console->Write("            extradll = ");
+			ParseArgument(commandLine,temp);
+
+			ExtraDLL *extra_dll = (ExtraDLL *)LocalAlloc(0,sizeof(ExtraDLL));
+			extra_dll->next = 0;
+			my_strcpy_s(extra_dll->file,temp);
+			Console->WriteLine(extra_dll->file);
+			
+			if (!extra_dlls_last) {
+				extra_dlls_last = extra_dlls = extra_dll;
+			}
+			else {
+				extra_dlls_last = extra_dlls_last->next = extra_dll;
+			}			
+		}
+		// SteamAPPId
+		else {
+			if (!my_stricmp(temp,TEXT("-SteamAPPId"))) {
+				if (!*commandLine) break;
+				ParseArgument(commandLine,temp);
+			}
+		
+			if (temp[0] && temp[0] != '-') {
+				Console->Write("            SteamAPPId = ");
+				my_strcpy_s(SteamAPPId,temp);
+				Console->WriteLine(SteamAPPId);
+			}
+		}
+	}
+
+	LocalFree((HLOCAL)temp);
+
+	if(!noskse) {
+		ExtraDLL *extra_dll = (ExtraDLL *)LocalAlloc(0,sizeof(ExtraDLL));
+		extra_dll->next = 0;
+		my_strcpy_s(extra_dll->file,TEXT("skse_steam_loader.dll"));
+			
+		extra_dll->next = extra_dlls;
+		extra_dlls = extra_dll;
+		if (!extra_dlls_last) extra_dlls_last = extra_dll;
+	}
+
+	// Finally
+	launch_parameters = commandLine;
+}
 
 int WinMainCRTStartup()
 {
@@ -328,177 +455,241 @@ int WinMainCRTStartup()
 		TCHAR logfile[MAX_PATH];
 		if (SUCCEEDED(hr = SHGetFolderPathAndSubDir(NULL,CSIDL_MYDOCUMENTS,NULL,SHGFP_TYPE_CURRENT,TEXT("My Games\\Skyrim"), logfile))) {
 			PathAppend(logfile, TEXT("Skyrim4GB.log"));
-			hOutput = hError = startupinfo.hStdOutput = startupinfo.hStdError = CreateFile(logfile,GENERIC_WRITE,FILE_SHARE_READ,&sec,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,0);
+			Console->h = Console->Error->h = startupinfo.hStdOutput = startupinfo.hStdError = CreateFile(logfile,GENERIC_WRITE,FILE_SHARE_READ,&sec,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,0);
 			startupinfo.dwFlags |= STARTF_USESTDHANDLES;
 
-			// Write byte order marks...
-			Write("\xEF\xBB\xBF",hOutput);
+			// Console->Write byte order marks...
+			Console->Write("\xEF\xBB\xBF");
 		}
 	}
 	else {
 		AllocConsole();
-		hOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-		hError = GetStdHandle(STD_ERROR_HANDLE);
+		Console->h = GetStdHandle(STD_OUTPUT_HANDLE);
+		Console->Error->h = GetStdHandle(STD_ERROR_HANDLE);
 	}
+
 
 	OSVERSIONINFO osinfo;
 	osinfo.dwOSVersionInfoSize = sizeof(osinfo);
-	Write("    Loader: Getting windows version");
+	Console->Write("    Loader: Getting windows version");
 	if (GetVersionEx(&osinfo)) {
-		Write(" - ");
-		Write((int) osinfo.dwMajorVersion);
-		Write(".");
-		Write((int) osinfo.dwMinorVersion);
-		Write(".");
-		Write((int) osinfo.dwBuildNumber);
-		Write(" ");
-		WriteLine(osinfo.szCSDVersion);
+		Console->Write(" - ")->Write((int) osinfo.dwMajorVersion)
+			     ->Write(".")->Write((int) osinfo.dwMinorVersion)
+				 ->Write(".")->Write((int) osinfo.dwBuildNumber)
+				 ->Write(" ")->WriteLine(osinfo.szCSDVersion);
 	}
 	else {
-		WriteLine(" - Failed");
+		Console->WriteError(" - Failed");
 	}
 
-	TCHAR this_name[MAX_PATH];
-	Write("    Loader: Getting executable name");
+	//
+	// Parse command line
+	// 
 
-	if (!GetModuleFileName(GetModuleHandle(NULL),this_name,MAX_PATH)) {
-		WriteLine(" - Failed");
+	Console->WriteLine("    Loader: Parsing Command Line...");
+	ParseCommandLine(GetCommandLine());
+
+	//
+	// Loaders Executable name (and path)
+	//
+
+	Console->Write("    Loader: Getting executable name");
+
+	if (!GetModuleFileName(GetModuleHandle(NULL),this_exe,MAX_PATH)) {
+		Console->WriteLine(" - Failed");
+		return false;
 	}
 	else {
-		Write(" - ");
-		WriteLine(this_name);
+		Console->Write(" - ");
+		Console->WriteLine(this_exe);
+
+		this_exe_filename = PathFindFileName(this_exe);
+
+		LPTSTR src = this_exe;
+		LPTSTR dst = this_exe_dir;
+		while (src != this_exe_filename) *dst++ = *src++;
+		*dst = 0;
 	}
 
-	// Get our name
-	TCHAR *slash = FindLast(this_name,'/');
-	TCHAR *backslash = FindLast(this_name,'\\');
-	INT_PTR dll_path_size = 0;
-	if (backslash && (!slash || backslash < slash)) dll_path_size = 1 + backslash - this_name;
-	else if (slash) dll_path_size = 1 + slash - this_name;
+	//
+	// Original executables name...
+	//
 
-	// want to make sure that we aren't called skyrim and going to cause an infinite loop
-	TCHAR *dot = FindFirst(this_name+dll_path_size, '.');
-	if (!dot) {
-		for (dot = this_name; *dot; dot++);
+	if (!*tesv_exe) {
+		my_strcpy_s(tesv_exe,TEXT("TESV.exe"));
 	}
-	
-	Write("    Loader: Making sure this executable is not called TESV.exe");
-	if (CompareString(LOCALE_INVARIANT, NORM_IGNORECASE, this_name+dll_path_size,dot-(this_name+dll_path_size),TEXT("TESV"),4) == CSTR_EQUAL)
-	{
-		WriteLine(" - It is");
-		if (dialog) PostMessage(dialog,WM_USER,0,0);
-		LogMessageBox(TEXT("Skyrim4GB loader must not be named TESV.exe"), TEXT("Error"), MB_ICONERROR);
-		return -1;
-	}
-	else
-		WriteLine(" - It isn't");
 
-	TCHAR skyrimpath[MAX_PATH+1] = TEXT("");
-	
-	HKEY regkey;
+	if (PathIsRelative(tesv_exe)) {
 
-	WriteLine("    Loader: Trying to get Skyrim path from Bethesda Softworks registry key");
-	Write("    Loader: Attmepting to open HKLM\\SOFTWARE\\Bethesda Softworks\\Skyrim");
-	if (RegOpenKey(HKEY_LOCAL_MACHINE,TEXT("SOFTWARE\\Bethesda Softworks\\Skyrim"),&regkey) == ERROR_SUCCESS)
-	{
-		WriteLine(" - Succeeded");
-		DWORD type;
-		Write("    Loader: Attempting to query size of \"Installed Path\" value");
-		if (RegQueryValueEx(regkey,TEXT("Installed Path"),NULL ,&type,NULL,NULL) == ERROR_SUCCESS)
+		HKEY regkey;
+
+		Console->WriteLine("    Loader: Trying to get Skyrim path from Bethesda Softworks registry key");
+		Console->Write("    Loader: Attmepting to open HKLM\\SOFTWARE\\Bethesda Softworks\\Skyrim");
+		if (RegOpenKey(HKEY_LOCAL_MACHINE,TEXT("SOFTWARE\\Bethesda Softworks\\Skyrim"),&regkey) == ERROR_SUCCESS)
 		{
-			WriteLine(" - Succeeded");
-			DWORD skyrimpath_size = (MAX_PATH+1)*sizeof(TCHAR);
-			Write("    Loader: Attempting to query \"Installed Path\" value");
-			if ((type == REG_SZ || type == REG_EXPAND_SZ) && RegQueryValueEx(regkey,TEXT("Installed Path"),NULL,&type,(LPBYTE) skyrimpath,&skyrimpath_size) == ERROR_SUCCESS)
-			{
-				if (type == REG_SZ || type == REG_EXPAND_SZ)
-				{
-					WriteLine(" - Succeeded");
-					skyrimpath[MAX_PATH] = 0;				
-				}
-				else
-					WriteLine(" - Failed");
-			}
-			else
-				WriteLine(" - Failed");
-		}
-		else
-			WriteLine(" - Failed");
-		RegCloseKey(regkey);
-	}
-	else
-		WriteLine(" - Failed");
-
-	// Attempt to get it from steam
-	if (!*skyrimpath) 
-	{
-		WriteLine("    Loader: Trying to get Skyrim path from Steam registry key");
-		Write("    Loader: Attmepting to open HKLM\\SOFTWARE\\Valve\\Steam");
-		if (RegOpenKey(HKEY_LOCAL_MACHINE,TEXT("SOFTWARE\\Valve\\Steam"),&regkey) == ERROR_SUCCESS)
-		{
-			WriteLine(" - Succeeded");
+			Console->WriteLine(" - Succeeded");
 			DWORD type;
-			Write("    Loader: Attempting to query size of \"InstallPath\" value");
-			if (RegQueryValueEx(regkey,TEXT("InstallPath"),NULL ,&type,NULL,NULL) == ERROR_SUCCESS)
+			Console->Write("    Loader: Attempting to query size of \"Installed Path\" value");
+			if (RegQueryValueEx(regkey,TEXT("Installed Path"),NULL ,&type,NULL,NULL) == ERROR_SUCCESS)
 			{
-				WriteLine(" - Succeeded");
-				DWORD skyrimpath_size = (MAX_PATH+1)*sizeof(TCHAR);
-				Write("    Loader: Attempting to query \"InstallPath\" value");
-				if ((type == REG_SZ || type == REG_EXPAND_SZ) && RegQueryValueEx(regkey,TEXT("InstallPath"),NULL,&type,(LPBYTE) skyrimpath,&skyrimpath_size) == ERROR_SUCCESS)
+				Console->WriteLine(" - Succeeded");
+				DWORD tesv_exe_dir_size = (MAX_PATH+1)*sizeof(TCHAR);
+				Console->Write("    Loader: Attempting to query \"Installed Path\" value");
+				if ((type == REG_SZ || type == REG_EXPAND_SZ) && RegQueryValueEx(regkey,TEXT("Installed Path"),NULL,&type,(LPBYTE) tesv_exe_dir,&tesv_exe_dir_size) == ERROR_SUCCESS)
 				{
 					if (type == REG_SZ || type == REG_EXPAND_SZ)
 					{
-						WriteLine(" - Succeeded");
-						skyrimpath[MAX_PATH] = 0;				
-						PathAppend(skyrimpath,TEXT("steamapps\\common\\skyrim"));
+						Console->WriteLine(" - Succeeded");
+						tesv_exe_dir[MAX_PATH] = 0;				
 					}
 					else
-						WriteLine(" - Failed");
+						Console->WriteLine(" - Failed");
 				}
 				else
-					WriteLine(" - Failed");
+					Console->WriteLine(" - Failed");
 			}
 			else
-				WriteLine(" - Failed");
+				Console->WriteLine(" - Failed");
 			RegCloseKey(regkey);
 		}
+		else
+			Console->WriteLine(" - Failed");
+
+		// Attempt to get it from steam
+		if (!*tesv_exe_dir) 
+		{
+			Console->WriteLine("    Loader: Trying to get Skyrim path from Steam registry key");
+			Console->Write("    Loader: Attmepting to open HKLM\\SOFTWARE\\Valve\\Steam");
+			if (RegOpenKey(HKEY_LOCAL_MACHINE,TEXT("SOFTWARE\\Valve\\Steam"),&regkey) == ERROR_SUCCESS)
+			{
+				Console->WriteLine(" - Succeeded");
+				DWORD type;
+				Console->Write("    Loader: Attempting to query size of \"InstallPath\" value");
+				if (RegQueryValueEx(regkey,TEXT("InstallPath"),NULL ,&type,NULL,NULL) == ERROR_SUCCESS)
+				{
+					Console->WriteLine(" - Succeeded");
+					DWORD tesv_exe_dir_size = (MAX_PATH+1)*sizeof(TCHAR);
+					Console->Write("    Loader: Attempting to query \"InstallPath\" value");
+					if ((type == REG_SZ || type == REG_EXPAND_SZ) && RegQueryValueEx(regkey,TEXT("InstallPath"),NULL,&type,(LPBYTE) tesv_exe_dir,&tesv_exe_dir_size) == ERROR_SUCCESS)
+					{
+						if (type == REG_SZ || type == REG_EXPAND_SZ)
+						{
+							Console->WriteLine(" - Succeeded");
+							tesv_exe_dir[MAX_PATH] = 0;				
+							PathAppend(tesv_exe_dir,TEXT("steamapps\\common\\skyrim"));
+						}
+						else
+							Console->WriteLine(" - Failed");
+					}
+					else
+						Console->WriteLine(" - Failed");
+				}
+				else
+					Console->WriteLine(" - Failed");
+				RegCloseKey(regkey);
+			}
+		}
+
+
+		if (*tesv_exe_dir) {
+			TCHAR pathtemp[MAX_PATH+1];
+			int i;
+			for (i = 0; i < MAX_PATH; i++) {
+				pathtemp[i] = tesv_exe[i];
+			}
+			pathtemp[i] = 0;
+			PathCombine(tesv_exe,tesv_exe_dir,pathtemp);
+		}
+		tesv_exe_filename = PathFindFileName(tesv_exe);
+	}
+	else {
+		tesv_exe_filename = PathFindFileName(tesv_exe);
+		LPTSTR src = tesv_exe;
+		LPTSTR dest = tesv_exe_dir;
+		while (src != tesv_exe_filename) *dest++ = *src++;
+		*dest = 0;
 	}
 
+	if (*tesv_exe_dir) {
+		Console->Write("    Loader: Changing directory to ")->WriteLine(tesv_exe_dir);
 
-	if (*skyrimpath) {
-		Write("    Loader: Changing directory to ");
-		WriteLine(skyrimpath);
-
-		if (!SetCurrentDirectory(skyrimpath)) {
+		if (!SetCurrentDirectory(tesv_exe_dir)) {
 			ShowError(TEXT("Unable set current dir to Skyrim dir."));
 			return -1;
 		}
 	}
 
-	WriteLine("    Loader: Validating TESV.exe...");
+	//
+	// LAA's executables name...
+	//
 
-	int res = Change4GBValue(TEXT("TESV.exe"), -2);
+	if (!*tesv_exe_4gb) {
+		my_strcpy_s(tesv_exe_4gb,tesv_exe);
+		my_strcat_s(tesv_exe_4gb,TEXT(".4gb"));
+	}
+	else if (PathIsRelative(tesv_exe_4gb)) {
+
+		LPTSTR src_dir;
+		if (tesv_exe_4gb[0] == '.' && (tesv_exe_4gb[1] == '/' || tesv_exe_4gb[1] == '\\'))
+			src_dir = this_exe_dir;
+		else
+			src_dir = tesv_exe_dir;
+
+		if (*src_dir) {
+			TCHAR pathtemp[MAX_PATH+1];
+			int i;
+			for (i = 0; i < MAX_PATH; i++) {
+				pathtemp[i] = tesv_exe_4gb[i];
+			}
+			pathtemp[i] = 0;
+			PathCombine(tesv_exe_4gb,src_dir,pathtemp);	
+		}
+	}
+
+	tesv_exe_4gb_filename = PathFindFileName(tesv_exe_4gb);
+	if (!PathIsRelative(tesv_exe_4gb))
+	{
+		LPTSTR src = tesv_exe_4gb;
+		LPTSTR dst = tesv_exe_4gb_dir;
+		while (src != tesv_exe_4gb_filename) *dst++ = *src++;
+		*dst = 0;
+	}
+
+	Console->Write("    Loader: Original exe is: ")->Write(tesv_exe)->WriteLine();
+	Console->Write("    Loader: LAA exe is: ")->Write(tesv_exe_4gb)->WriteLine();
+
+	Console->WriteLine("    Loader: Validating original exe...");
+
+	int res = Change4GBValue(tesv_exe, -2);
 
 	if (res < 0) {
-		WriteLine("    Loader: Validation Failed!");
-		DeleteFile(TEXT("TESV.exe.4gb"));
+		Console->WriteLine("    Loader: Validation Failed!");
+		if (CheckFilenames(tesv_exe,tesv_exe_4gb)) DeleteFile(tesv_exe_4gb);
 		if (res == -2) {
 			if (dialog) PostMessage(dialog,WM_USER,0,0);
-			LogMessageBox(TEXT("TESV.exe modified -> Executable headers failed to validate.\n")
+			LogMessageBox(TEXT("Original exe modified -> Executable headers failed to validate.\n")
 				TEXT("\n")
-				TEXT("An unmodified TESV.exe is required. You should get Steam to validate your game cache and download unmodified versions of any files."), TEXT("Error"), MB_ICONERROR);
+				TEXT("An unmodified original exe is required. You should get Steam to validate your game cache and download unmodified versions of any files."), TEXT("Error"), MB_ICONERROR);
 		}
 		return -1;
 	}
 	else {
-		WriteLine("    Loader: Validation passed");
+		Console->WriteLine("    Loader: Validation passed");
 	}
 
-	WriteLine("    Loader: Getting file attributes for TESV.exe");
+	//
+	// Checking filenames
+	//
+	if (!CheckAllFilenames()) {
+		return -1;
+	}
+
+
+	Console->WriteLine("    Loader: Getting file attributes for original exe");
 	WIN32_FILE_ATTRIBUTE_DATA TESV_exe_info, TESV_4gb_info;
-	if (!GetFileAttributesEx(TEXT("TESV.exe"),GetFileExInfoStandard,&TESV_exe_info))
+	if (!GetFileAttributesEx(tesv_exe,GetFileExInfoStandard,&TESV_exe_info))
 	{
-		ShowError(TEXT("Unable to get file attribute for TESV.exe"));
+		ShowError(TEXT("Unable to get file attribute for original exe"));
 		return -1;
 	}
 
@@ -519,40 +710,43 @@ int WinMainCRTStartup()
 	}
 #endif
 
-	Write("    Loader: Checking if file attributes for TESV.exe and TESV.exe.4gb match");
-	if (!GetFileAttributesEx(TEXT("TESV.exe.4gb"),GetFileExInfoStandard,&TESV_4gb_info) || 
+	Console->Write("    Loader: Checking if file attributes for original exe and LAA exe match");
+	if (!GetFileAttributesEx(tesv_exe_4gb,GetFileExInfoStandard,&TESV_4gb_info) || 
 		TESV_exe_info.ftCreationTime != TESV_4gb_info.ftCreationTime ||
 		TESV_exe_info.ftLastWriteTime != TESV_4gb_info.ftLastWriteTime ||
 		TESV_exe_info.nFileSizeHigh != TESV_4gb_info.nFileSizeHigh ||
 		TESV_exe_info.nFileSizeLow != TESV_4gb_info.nFileSizeLow)
 	{
-		WriteLine(" - They didn't. Copying TESV.exe to TESV.exe.4gb");
+		Console->Write(" - They didn't. Copying ")->Write(tesv_exe)->Write(" to ")->Write(tesv_exe_4gb)->WriteLine();
 
-		if (!CopyFile(TEXT("TESV.exe"),TEXT("TESV.exe.4gb"),FALSE))
+		if (*tesv_exe_4gb_dir) CreateDirectory(tesv_exe_4gb_dir,NULL);
+		if (!CopyFile(tesv_exe,tesv_exe_4gb,FALSE))
 		{
-			ShowError(TEXT("Unable to copy TESV.exe to TESV.exe.4gb"));
+			ShowError(TEXT("Unable to copy file."));
 			return -1;
 		}
 	}
 	else {
-		WriteLine(" - They did.");
-		WriteLine("    Loader: Validating and checking status of TESV.exe.4gb...");
+		Console->WriteLine(" - They did.");
+		Console->Write("    Loader: Validating and checking status of ")->Write(tesv_exe_4gb)->Write("...")->WriteLine();
 
-		res = Change4GBValue(TEXT("TESV.exe.4gb"), -1);
+		res = Change4GBValue(tesv_exe_4gb, -1);
 
 		// Couldn't read 4gb file or there was a validation error...
 		if (res < 0) {
 			// So delete the file
-			DeleteFile(TEXT("TESV.exe.4gb"));
+			DeleteFile(tesv_exe_4gb);
 
 			// Exe validation error..
 			if (res == -2) {
-				WriteLine("    Loader: Failed to validate TESV.exe.4gb. Copying TESV.exe to TESV.exe.4gb");
+				Console->Write("    Loader: File failed to validate. Copying ")->Write(tesv_exe)->Write(" to ")->Write(tesv_exe_4gb)->WriteLine();
+
+				if (*tesv_exe_4gb_dir) CreateDirectory(tesv_exe_4gb_dir,NULL);
 
 				// Grab a new copy
-				if (!CopyFile(TEXT("TESV.exe"),TEXT("TESV.exe.4gb"),FALSE))
+				if (!CopyFile(tesv_exe,tesv_exe_4gb,FALSE))
 				{
-					ShowError(TEXT("Unable to copy TESV.exe to TESV.exe.4gb"));
+					ShowError(TEXT("Unable to copy file."));
 					return -1;
 				}
 			}
@@ -562,102 +756,277 @@ int WinMainCRTStartup()
 			}
 		} else {
 			updatereq = (res != 0) != (setbit!=FALSE);
-			if (updatereq) WriteLine("    Loader: TESV.exe.4gb needs updating");
-			else WriteLine("    Loader: TESV.exe.4gb seems good");
+			if (updatereq) Console->WriteLine("    Loader: needs updating");
+			else Console->WriteLine("    Loader: seems good");
 		}
 	}
 
 	if (updatereq) {
-		WriteLine("    Loader: Updating LAA flag in TESV.exe.4gb as required");
+		Console->WriteLine("    Loader: Updating LAA flag as required");
 
-		res = Change4GBValue(TEXT("TESV.exe.4gb"), (setbit!=FALSE)?1:0, &TESV_exe_info);
+		res = Change4GBValue(tesv_exe_4gb, (setbit!=FALSE)?1:0, &TESV_exe_info);
 
 		if (res < 0) {
-			DeleteFile(TEXT("TESV.exe.4gb"));
+			DeleteFile(tesv_exe_4gb);
 
 			if (res == -2 ) 
-				LogMessageBox(TEXT("Unable to successfully create TESV.exe.4gb"), TEXT("Error"), MB_ICONERROR);
+				LogMessageBox(TEXT("Unable to successfully set LAA flag"), TEXT("Error"), MB_ICONERROR);
 
 			return -1;		
 		}
 	}
 
-	Write("    Loader: Looking for SteamAPPId passed on command line");
-
-	LPTSTR commandLine = GetCommandLine();
+	// should get it from steam\config\config.vdf
 
 	// Find the argument, if it exists
-	bool quoted = false;
-	while (*commandLine)
-	{
-		if (*commandLine=='\"') quoted = !quoted;
-		else if (!quoted && *commandLine==' ') {
-			commandLine++;
-			break;
-		}
-		commandLine++;
-	}
 
-	if (!*commandLine) {
-		WriteLine(" - Didn't find it. Using default 72850");
-		commandLine = TEXT("72850");
+	Console->Write("    Loader: Setting SteamAPPId environment variable to ");
+	if (!*SteamAPPId) {
+		Console->WriteLine("72850 (default)");
+		my_strcpy_s(SteamAPPId,TEXT("72850"));
 	}
 	else {
-		Write(" - Found it: ");
-		WriteLine(commandLine);
+		Console->WriteLine(SteamAPPId);
 	}
 
-	if (!SetEnvironmentVariable(TEXT("SteamAPPId"),commandLine))
+	if (!SetEnvironmentVariable(TEXT("SteamAPPId"),SteamAPPId))
 	{
-		ShowError(TEXT("Unable to set SteamAppId"));
+		ShowError(TEXT("Unable to set SteamAPPId"));
 		return -1;
 	}
 
 	timeBeginPeriod(3);
 
-	Write("    Loader: Creating TESV.exe.4gb process");
-	if (CreateProcess(setbit?TEXT("TESV.exe.4gb"):TEXT("TESV.exe"), TEXT("TESV.exe"), NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, &startupinfo,  &procinfo))
+	size_t commandLineSize = (my_strlen(tesv_exe)+my_strlen(launch_parameters)+1)*sizeof(TCHAR);
+	LPTSTR commandLine = (LPTSTR) LocalAlloc(0,commandLineSize );
+	my_strcpy_s(commandLine, commandLineSize, tesv_exe);
+	my_strcat_s(commandLine, commandLineSize, launch_parameters);
+
+	Console->Write("    Loader: Creating process: \"")->Write(tesv_exe_4gb)->Write("\" ")->Write(launch_parameters)->WriteLine();
+	if (CreateProcess(setbit?tesv_exe_4gb:tesv_exe, commandLine, NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, &startupinfo,  &procinfo))
 	{
-		WriteLine(" - Succeeded");
-
-#ifdef UNICODE
-		LPBYTE addr_load_lib = (LPBYTE) GetProcAddress(GetModuleHandle(TEXT("KERNEL32")),"LoadLibraryW");
-#else
-		LPBYTE addr_load_lib = (LPBYTE) GetProcAddress(GetModuleHandle(TEXT("KERNEL32")),"LoadLibraryA");
-#endif
-
-		WriteLine("    Loader: Allocating memory buffer in TESV.exe.4gb procress");
-		const TCHAR dllname[] = TEXT("skyrim4gb_helper.dll");
-		LPBYTE ADDR_name = (LPBYTE) VirtualAllocEx(procinfo.hProcess,0, dll_path_size*sizeof(TCHAR)+sizeof(dllname), MEM_COMMIT|MEM_TOP_DOWN, PAGE_EXECUTE_READWRITE);
-
-		SIZE_T num_written;
-
-		WriteLine("    Loader: Writing helper dll name into memory buffer");
-		if(dll_path_size) WriteProcessMemory(procinfo.hProcess,ADDR_name,this_name,dll_path_size*sizeof(TCHAR),&num_written);
-		WriteProcessMemory(procinfo.hProcess,ADDR_name+dll_path_size*sizeof(TCHAR),dllname,sizeof(dllname),&num_written);
-
-
-		// Create a thread to inject the dll... and wait till it's finished
-		WriteLine("    Loader: Creating remote thread to load helper dll");
-		HANDLE hook_thread = CreateRemoteThread(procinfo.hProcess,NULL,32768,(LPTHREAD_START_ROUTINE)addr_load_lib, ADDR_name, 0, NULL);
-		if (hook_thread == NULL) {
-			ShowError(TEXT("Failed to create Remote thread"));
+		Console->Write("    Loader: Allocating memory buffer in child procress");
+		DWORD_PTR ADDR_buffer = (DWORD_PTR) VirtualAllocEx(procinfo.hProcess,0, 65536, MEM_COMMIT|MEM_TOP_DOWN, PAGE_EXECUTE_READWRITE);
+		if (ADDR_buffer == 0) {
+			ShowError(TEXT("Error allocating memory in child process"));
+			goto FAILURE; 
 		}
 		else {
-			WriteLine("    Loader: Waiting for remote thread to exit");
-			WaitForSingleObject(hook_thread,INFINITE);
-			DWORD result;
-			GetExitCodeThread(hook_thread, &result);
+			Console->Write(" - Success. Buffer at ")->Write(ADDR_buffer)->WriteLine();
 		}
-		CloseHandle(hook_thread);
+		SIZE_T num_written;
 
-		// Release our resources
-		WriteLine("    Loader: Freeing memory buffer in TESV.exe.4gb process");
-		VirtualFreeEx(procinfo.hProcess,ADDR_name,0,MEM_RELEASE);
+		// Work around ASLR
+		HMODULE thisKernel32 = GetModuleHandle(TEXT("KERNEL32"));
+		MODULEINFO thisKernel32Info;
+		TCHAR thisKernel32Filename[MAX_PATH+1];
+		HMODULE *otherModules = 0;
+		HMODULE otherKernel32 = 0;
+		MODULEINFO otherKernel32Info;
+		TCHAR otherKernel32Filename[MAX_PATH+1];
+		DWORD otherModuleCount = 0;
+		DWORD needed = 0;
+
+		LPVOID ADDR_write = 0;
+		SIZE_T SIZE_write = 0;
+
+		//
+		// Get Kernel Information from this process
+		//
+
+		Console->WriteLine("    Loader: Getting handle to Kernel32");
+		if (!thisKernel32 ) {
+			ShowError(TEXT("Error getting handle to Kernel32"));
+			goto FAILURE; 
+		}
+
+		Console->WriteLine("    Loader: Getting filename of Kernel32");
+		if (!GetModuleFileName(thisKernel32,thisKernel32Filename,sizeof(thisKernel32Filename))) {
+			ShowError(TEXT("Error getting filename of Kernel32"));
+			goto FAILURE; 
+		}
+
+		Console->WriteLine("    Loader: Getting module information for Kernel32");
+		if (!GetModuleInformation(GetCurrentProcess(),thisKernel32,&thisKernel32Info,sizeof(thisKernel32Info))) {
+			ShowError(TEXT("Error getting module information for Kernel32"));
+			goto FAILURE; 
+		}
+
+		//
+		// Get Kernel32 Information from remote process
+		// 
+		Console->WriteLine("    Loader: Creating remote thread to initialize libraries");
+
+		LPVOID code;
+		DWORD code_size;
+
+		code_size = Injection::GetStubCode(code);
+
+		if (!WriteProcessMemory(procinfo.hProcess,ADDR_write=(LPVOID)(ADDR_buffer),code,SIZE_write=code_size,&num_written)) {
+			goto WRITE_MEMORY_FAILURE; 
+		}
+
+		HANDLE remote_thread = CreateRemoteThread(procinfo.hProcess,NULL,32768,(LPTHREAD_START_ROUTINE)ADDR_buffer, 0, 0, NULL);
+		if (remote_thread == NULL) {
+			Console->WriteError(TEXT("    Loader: Failed to create Remote thread"));
+			goto INFO_FAILURE; 
+		}
+		else {
+			Console->WriteLine("    Loader: Waiting for remote thread to exit");
+			WaitForSingleObject(remote_thread,INFINITE);
+			DWORD result;
+			GetExitCodeThread(remote_thread, &result);
+			CloseHandle(remote_thread);
+
+			if (result != 0) {
+				Console->Write(TEXT("    Loader: Remote thread exited with unexpected return value 0x"));
+				Console->WriteLine((DWORD_PTR) result);
+			}
+		}
+
+		Console->WriteLine("    Loader: Getting number of modules loaded in child process");
+		if (!EnumProcessModules(procinfo.hProcess,&otherKernel32, sizeof(HMODULE), &needed )) {
+			Console->WriteError(TEXT("    Loader:Error getting number of modules loadeded in child process"));
+			goto INFO_FAILURE; 
+		}
+
+		otherKernel32 = 0;
+		otherModuleCount = needed;
+		Console->WriteLine("    Loader: Getting handles to modules loaded in child process");
+		otherModules = (HMODULE*) LocalAlloc(LMEM_FIXED,otherModuleCount);
+		for (;;) {
+
+			if (!EnumProcessModules(procinfo.hProcess, otherModules, otherModuleCount, &needed )) {
+				ShowError(TEXT("    Loader:Error getting handles to modules loaded in child process"));
+				goto INFO_FAILURE; 
+			}
+
+			if (otherModuleCount <= needed) {
+				otherModuleCount = needed;
+				break;
+			}
+
+			Console->WriteLine("    Loader: Buffer was too small - trying again with a larger buffer");
+			otherModuleCount = needed;
+			otherModules = (HMODULE*)LocalReAlloc((HLOCAL)otherModules,otherModuleCount,0);
+		}
+
+		Console->WriteLine("    Loader: Looking for handle to Kernel32 in module handle list from child process");
+		for (DWORD i = 0; i < otherModuleCount/sizeof(HMODULE); i++) {
+
+			if (!GetModuleFileNameEx(procinfo.hProcess,otherModules[i],otherKernel32Filename,MAX_PATH+1)) {
+				Console->WriteError("    Loader: Failed to get module filename of a module in the child process");
+			}
+
+			if (CompareString(LOCALE_INVARIANT, NORM_IGNORECASE, thisKernel32Filename,-1,otherKernel32Filename,-1) != CSTR_EQUAL) {
+				continue;
+			}
+	
+
+			if (!GetModuleInformation(procinfo.hProcess,otherKernel32 = otherModules[i],&otherKernel32Info, sizeof(otherKernel32Info))) {
+				Console->WriteError(TEXT("    Loader:Error getting module information of Kernel32 in child process"));
+				goto INFO_FAILURE;
+			}
+			break;
+		}
+		
+		if (!otherKernel32) {
+INFO_FAILURE:
+			Console->WriteLine("    Loader: Couldn't find handle to Kernel32 in child process. Assuming its the same as this one");
+			otherKernel32Info = thisKernel32Info;
+		}
+
+		//
+		// Inject code to load helper into remote process
+		//
+		Console->WriteLine("    Loader: Injecting dll loader code into child process.");
+
+		code_size = Injection::GetInjectionCode(code);
+
+		if (!WriteProcessMemory(procinfo.hProcess,ADDR_write=(LPVOID)(ADDR_buffer),code,SIZE_write=code_size,&num_written)) {
+			goto WRITE_MEMORY_FAILURE; 
+		}
+
+		DWORD_PTR ADDR_injection = ADDR_buffer+num_written;
+		Injection injection;
+		const TCHAR szDllName[] = TEXT("skyrim4gb_helper.dll");
+		const CHAR szFuncName[] = "_CompleteInjection@4";
+
+		DWORD_PTR addr_diff =  (DWORD_PTR) otherKernel32Info.lpBaseOfDll - (DWORD_PTR) thisKernel32Info.lpBaseOfDll;
+
+#ifdef UNICODE
+		*(DWORD_PTR*)&injection.LoadLibrary = (DWORD_PTR) GetProcAddress(thisKernel32,"LoadLibraryW") + addr_diff;
+#else
+		*(DWORD_PTR*)&injection.LoadLibrary = (DWORD_PTR) GetProcAddress(thisKernel32,"LoadLibraryA") + addr_diff;
+#endif
+
+		*(DWORD_PTR*)&injection.GetProcAddress = (DWORD_PTR) GetProcAddress(thisKernel32,"GetProcAddress") + addr_diff;
+
+		*(DWORD_PTR*)&injection.GetLastError = (DWORD_PTR) GetProcAddress(thisKernel32,"GetLastError") + addr_diff;
+
+		SIZE_T dll_path_size = this_exe_filename - this_exe;
+
+		SIZE_T tesv_exe_size = my_strlen(tesv_exe)+1;
+
+		injection.ADDR_buffer = (LPVOID)(ADDR_buffer);
+		injection.szDllName = LPTSTR(ADDR_injection+sizeof(Injection));
+		injection.szFuncName = (LPSTR)(injection.szDllName+dll_path_size+sizeof(szDllName)/sizeof(TCHAR));
+		injection.szOriginalName = (LPTSTR)(injection.szFuncName+sizeof(szFuncName));
+		injection.szExtraDLLs = (LPTSTR)(injection.szOriginalName+tesv_exe_size);
+
+		Console->WriteLine("    Loader: Writing injection data into child process.");
+
+		if (!WriteProcessMemory(procinfo.hProcess, ADDR_write=(LPVOID)ADDR_injection, &injection, SIZE_write=sizeof(Injection), &num_written)) {
+			goto WRITE_MEMORY_FAILURE; 
+		}
+
+		if (dll_path_size && !WriteProcessMemory(procinfo.hProcess,ADDR_write=injection.szDllName,this_exe,SIZE_write=dll_path_size*sizeof(TCHAR),&num_written)) {
+			goto WRITE_MEMORY_FAILURE; 
+		}
+
+		if (!WriteProcessMemory(procinfo.hProcess,ADDR_write=injection.szDllName+dll_path_size,szDllName,SIZE_write=sizeof(szDllName),&num_written)) {
+			goto WRITE_MEMORY_FAILURE; 
+		}
+			
+		if (!WriteProcessMemory(procinfo.hProcess,ADDR_write=injection.szFuncName,szFuncName,SIZE_write=sizeof(szFuncName),&num_written)) {
+			goto WRITE_MEMORY_FAILURE; 
+		}
+
+		if (!WriteProcessMemory(procinfo.hProcess,ADDR_write=injection.szOriginalName,tesv_exe,SIZE_write=tesv_exe_size*sizeof(TCHAR),&num_written)) {
+			goto WRITE_MEMORY_FAILURE; 
+		}
+
+		ADDR_write = (LPBYTE)ADDR_write + SIZE_write;
+		for (ExtraDLL *extra_dll = extra_dlls; extra_dll != 0; extra_dll = extra_dll->next) {
+			if (!WriteProcessMemory(procinfo.hProcess,ADDR_write,extra_dll->file,SIZE_write=(my_strlen(extra_dll->file)+1)*sizeof(TCHAR),&num_written)) {
+				goto WRITE_MEMORY_FAILURE; 
+			}
+			ADDR_write = (LPBYTE)ADDR_write + SIZE_write;
+		}
+		if (!WriteProcessMemory(procinfo.hProcess,ADDR_write,TEXT(""),SIZE_write=sizeof(TCHAR),&num_written)) {
+			goto WRITE_MEMORY_FAILURE; 
+		}
+		// Create a thread to inject the dll... and wait till it's finished
+		Console->WriteLine("    Loader: Creating remote thread to load helper dll");
+		remote_thread = CreateRemoteThread(procinfo.hProcess,NULL,32768,(LPTHREAD_START_ROUTINE)ADDR_buffer, (LPVOID)ADDR_injection, 0, NULL);
+		if (remote_thread == NULL) {
+			ShowError(TEXT("Failed to create Remote thread"));
+			goto FAILURE;
+		}
+		else {
+			Console->WriteLine("    Loader: Waiting for remote thread to exit");
+			WaitForSingleObject(remote_thread,INFINITE);
+			DWORD result;
+			GetExitCodeThread(remote_thread, &result);
+			if (result != ERROR_SUCCESS) {
+				ShowError(TEXT("Error while injecting helper into remote thread."),result);
+			}
+		}
+		CloseHandle(remote_thread);
 
 		if (setbit)
 		{
-			Write("    Loader: Checking if LAA has any effect");
+			Console->Write("    Loader: Checking if LAA has any effect");
 			MEMORY_BASIC_INFORMATION  meminfo;
 
 			SIZE_T buffersize = VirtualQuery((LPVOID)(1UL<<31),&meminfo,sizeof(meminfo));
@@ -665,51 +1034,76 @@ int WinMainCRTStartup()
 			// If this exe doesnt get a larger than normal address space, don't check the game itself
 			if (buffersize != 0)
 			{
-				WriteLine(" - It does.");
-				Write("    Loader: Checking if LAA flag worked for TESV.exe.4gb process");
+				Console->WriteLine(" - It does.");
+				Console->Write("    Loader: Checking if LAA flag worked for child process");
 
 				buffersize = VirtualQueryEx(procinfo.hProcess,(LPVOID)(1UL<<31),&meminfo,sizeof(meminfo));
 				if (buffersize != 0) {
-					WriteLine(" - It Did");
+					Console->WriteLine(" - It Did");
 				}
 				else {
 					DWORD error = GetLastError();
-					WriteLine(" - It Didn't");
+					Console->WriteLine(" - It Didn't");
 					ShowError(TEXT("Error while checking Address Space"),error);
 				}
 			}
 			else {
-				WriteLine(" - It doesn't. Operating System must be 32bit without /3GB switch enabled");
+				Console->WriteLine(" - It doesn't. Operating System must be 32bit without /3GB switch enabled");
 			}
 		}
 
 		// Resume the main thread and then leave!
-		WriteLine("    Loader: Starting main thread in TESV.exe.4gb process");
+		Console->WriteLine("    Loader: Starting main thread in child process");
 		ResumeThread(procinfo.hThread);
 		CloseHandle(procinfo.hThread);
 
 		if (dialog) PostMessage(dialog,WM_USER,0,0);
 
 		if (IsDebuggerPresent()) {
-			WriteLine("    Loader: Waiting for TESV.exe.4gb process to exit");
+			Console->WriteLine("    Loader: Waiting for child process to exit");
 			WaitForSingleObject(procinfo.hProcess,INFINITE);
 		}
 		CloseHandle(procinfo.hProcess);
+
+		res = 0;
+		goto FINISH;
+
+WRITE_MEMORY_FAILURE:
+		{
+			DWORD error = GetLastError();
+			Console->Write("Failed to write 0x")
+					->Write((DWORD_PTR)SIZE_write)
+					->Write(" bytes at 0x")
+					->Write(ADDR_write)
+					->Write(" in child process. ")
+					->WriteError(error);
+			ShowError(TEXT("Failed to write to memory of child process"),error);
+		}
+
+FAILURE:
+
+		TerminateProcess(procinfo.hProcess,-1);
+		CloseHandle(procinfo.hThread);
+		CloseHandle(procinfo.hProcess);
+		res = -1;
+FINISH:
+		;
 	}
 	else
 	{
-		WriteLine(" - Failed");
-
-		ShowError(TEXT("Failed to start Skyrim"));
+		DWORD error = GetLastError();
+		Console->WriteLine(" - Failed");
+		ShowError(TEXT("Failed to start Skyrim"),error);
+		res = -1;
 	}
 
 	timeEndPeriod(3);
 
 	if (dialog) PostMessage(dialog,WM_USER,0,0);
 
-//	DeleteFile(TEXT("TESV.exe.4gb"));
-	WriteLine("    Loader: Exiting");
+//	DeleteFile(tesv_exe_4gb);
+	Console->WriteLine("    Loader: Exiting");
 
-	return 0;
+	return res;
 }
 

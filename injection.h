@@ -1,5 +1,5 @@
 /*
-SKyrim 4GB Console IO
+Skyrim 4GB Loader
 Copyright (C) 2010,2011  Renee Stanley (the.wench@wenchy.net)
 
 This library is free software; you can redistribute it and/or
@@ -19,32 +19,22 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
 #pragma once
 
-struct ConIO {
-	HANDLE h;
-	ConIO* Error;
 
-	ConIO* WriteLine();
+struct __declspec(align(4)) Injection {
+	HMODULE (WINAPI *LoadLibrary) (__in  LPCTSTR lpFileName);
+	FARPROC (WINAPI *GetProcAddress) (__in  HMODULE hModule, __in  LPCSTR lpProcName);
+	DWORD (WINAPI * GetLastError)(void);
 
-	ConIO* Write(const char *str);
-	ConIO* WriteLine(const char *str);
+	LPVOID	ADDR_buffer;
 
-	ConIO* Write(const wchar_t *str);
-	ConIO* WriteLine(const wchar_t *str);
+	LPTSTR	szDllName;
+	LPSTR	szFuncName;
 
-	ConIO* Write(DWORD_PTR val);
-	ConIO* WriteLine(DWORD_PTR val);
+	LPTSTR	szOriginalName;
 
-	inline ConIO* Write(LPVOID val) { Write((DWORD_PTR)val); return this; }
-	inline ConIO* WriteLine(LPVOID  val) { WriteLine((DWORD_PTR)val); return this; }
+	// Buffer of strings, double null terminated
+	LPTSTR  szExtraDLLs;
 
-	ConIO* Write(int val);
-	ConIO* WriteLine(int val);
-
-	ConIO* WriteError(DWORD error=GetLastError());
-	ConIO* WriteError(const char *str, DWORD error=GetLastError());
-	ConIO* WriteError(const wchar_t *str, DWORD error=GetLastError());
-
+	static DWORD_PTR WINAPI GetInjectionCode(LPVOID &start);
+	static DWORD_PTR WINAPI GetStubCode(LPVOID &start);
 };
-
-extern ConIO *Console;
-
